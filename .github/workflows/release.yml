@@ -1,13 +1,15 @@
 name: Build installer
 
-# Pushing a tag like v2026.11.13 builds ShootClipper-Setup-2026.11.13.exe, checks it
-# on a real Windows machine, and publishes it as a GitHub release. The installed app
-# looks at the latest release when it opens and offers the update.
+# Changing the VERSION file on main (say to 2026.11.13) builds
+# ShootClipper-Setup-2026.11.13.exe, checks it on a real Windows machine, and publishes
+# it as release v2026.11.13. The installed app looks at the latest release when it
+# opens and offers the update.
 # "Run workflow" on the Actions tab builds a test installer without publishing.
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths: [VERSION]
   workflow_dispatch:
 
 permissions:
@@ -30,8 +32,8 @@ jobs:
 
       - name: Set version
         run: |
-          if ($env:GITHUB_REF_TYPE -eq "tag") { $v = $env:GITHUB_REF_NAME.TrimStart("v") }
-          else { $v = (Get-Content VERSION -Raw).Trim() + "-test" }
+          $v = (Get-Content VERSION -Raw).Trim()
+          if ($env:GITHUB_EVENT_NAME -ne "push") { $v = "$v-test" }
           Set-Content -Path VERSION -Value $v -NoNewline
           "SC_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Version $v"
@@ -80,9 +82,11 @@ jobs:
           retention-days: 14
 
       - name: Publish release
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.SC_VERSION }}
+          target_commitish: ${{ github.sha }}
           files: dist/ShootClipper-Setup-*.exe
           body_path: packaging/release-notes.md
           name: Shoot Clipper ${{ env.SC_VERSION }}

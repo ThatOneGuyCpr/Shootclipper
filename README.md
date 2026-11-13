@@ -132,4 +132,4 @@ Install as above. Your settings, library and API key carry over automatically. T
 
 Developers can still run from a copy of this repository: double-click `Launch Shoot Clipper.bat`, which sets up Python 3.12, the packages and ffmpeg. Updates for a source copy go through Settings > Updates > **Install update…** with a zip.
 
-To publish a new version, push a tag such as `v2026.11.14`. GitHub Actions builds the installer, runs a self-test on Windows and attaches it to a release, and installed copies pick it up the next time they open.
+To publish a new version, change the `VERSION` file on main (for example to `2026.11.14`). GitHub Actions builds the installer, runs a self-test on Windows and attaches it to a release, and installed copies pick it up the next time they open.
