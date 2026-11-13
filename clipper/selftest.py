@@ -55,15 +55,23 @@ def _checks():
         return cv2.__version__
 
     def whisper():
-        # Downloads the tiny model (about 75 MB) and transcribes a second of tone,
+        # Downloads the tiny model (about 75 MB) and transcribes a short tone from a video file,
         # which exercises ctranslate2, onnxruntime (VAD) and the bundled assets.
-        import numpy as np
         from faster_whisper import WhisperModel
         from . import transcribe
-        audio = (0.1 * np.sin(2 * np.pi * 220 * np.arange(16000) / 16000)).astype(np.float32)
+        # Decode a real video file the way transcribe() does, so the audio path is covered too.
+        with tempfile.TemporaryDirectory() as tmp:
+            clip = Path(tmp) / "tone.mp4"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=220:d=2",
+                            "-f", "lavfi", "-i", "color=c=black:s=320x240:d=2", "-shortest",
+                            "-c:v", "libx264", "-c:a", "aac", str(clip)], check=True,
+                           creationflags=util.NO_WINDOW)
+            audio = transcribe.load_audio(clip)
+        assert len(audio) > 16000, f"decoded only {len(audio)} samples"
         model = WhisperModel(str(transcribe.ensure_model("tiny", lambda m: None)), device="cpu",
                              compute_type="int8")
-        segs, _ = model.transcribe(audio, vad_filter=True)
+        segs, _ = model.transcribe(audio, language="en", word_timestamps=True, vad_filter=True,
+                                   vad_parameters={"min_silence_duration_ms": 500})
         list(segs)
         import ctranslate2
         import onnxruntime

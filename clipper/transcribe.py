@@ -144,6 +144,20 @@ def ensure_model(name, log, progress=None):
                        "an antivirus or firewall may be blocking huggingface.co.")
 
 
+def load_audio(media_path, sr=16000):
+    """Decode any audio/video file to 16 kHz mono float32 with the bundled ffmpeg.
+    (faster-whisper's own decoder depends on PyAV versions that keep changing.)"""
+    import subprocess
+    import numpy as np
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(media_path), "-vn", "-ac", "1",
+           "-ar", str(sr), "-f", "f32le", "-"]
+    r = subprocess.run(cmd, capture_output=True, creationflags=util.NO_WINDOW)
+    if r.returncode != 0 or not r.stdout:
+        err = r.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError(f"Couldn't read the audio ({err[-1] if err else 'no audio track'})")
+    return np.frombuffer(r.stdout, np.float32)
+
+
 def transcribe(media_path, title, out_dir, cfg, log, progress=None):
     from faster_whisper import WhisperModel
 
@@ -168,8 +182,9 @@ def transcribe(media_path, title, out_dir, cfg, log, progress=None):
     names = config.load_names() + [a for v in config.load_aliases().values() for a in v if len(a) > 3]
     prompt = build_prompt(title, names)
     fixes = config.load_fixes()
+    audio = load_audio(media_path)
     segments_iter, info = model.transcribe(
-        str(media_path), language="en", beam_size=5, word_timestamps=True,
+        audio, language="en", beam_size=5, word_timestamps=True,
         vad_filter=True, vad_parameters={"min_silence_duration_ms": 500},
         initial_prompt=prompt, condition_on_previous_text=False,
     )

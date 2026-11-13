@@ -1,2 +1,2 @@
-- Fixes "Unable to open file 'model.bin'" when transcribing. The speech-to-text model now downloads into Shoot Clipper's own folder, gets checked once it's down, and retries another way if the first download fails.
-- The log shows the model download while it happens (one time only, about 485 MB).
+- Fixes "open() got an unexpected keyword argument 'metadata_errors'" when transcribing. Audio is now read with the built-in ffmpeg instead of a library whose newest version broke it.
+- The build's self-test now transcribes from a real video file, so this kind of break gets caught before a release goes out.
