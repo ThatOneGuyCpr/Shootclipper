@@ -14,7 +14,7 @@ import traceback
 from pathlib import Path
 from urllib.parse import quote
 
-from . import applog, config, db, ingest, news, pipeline, render, signals, transcribe, updater, util
+from . import applog, cleanup, config, db, ingest, jobs, news, pipeline, render, signals, transcribe, updater, util
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -28,6 +28,12 @@ STEP_LABELS = {"news": "News", "download": "Download", "transcribe": "Transcribe
 CLIP_FIELDS = {"start", "end", "hook", "context_card", "caption", "hashtags", "framing",
                "gameplay", "speaker", "notes"}
 VIDEO_TYPES = ("Video files (*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v)", "All files (*.*)")
+
+
+def _yt_thumb(url):
+    import re
+    m = re.search(r"[?&]v=([\w-]{6,})", url or "")
+    return f"https://i.ytimg.com/vi/{m.group(1)}/mqdefault.jpg" if m else ""
 
 
 def exposed(fn):
@@ -64,6 +70,7 @@ class Api:
         self._update = None
         if updater.FROZEN:
             threading.Thread(target=self._check_update_bg, daemon=True).start()
+        threading.Thread(target=self._cleanup_bg, daemon=True).start()
 
     # ── internals ───────────────────────────────────────────────────────────
 
@@ -92,10 +99,17 @@ class Api:
                 raise RuntimeError("Something is already running. It will finish first.")
             self._busy, self._label, self._job_error, self._progress = True, label, "", 0.0
             self._steps = [{"key": k, "label": STEP_LABELS[k], "state": "pending"} for k in steps]
+            jobs.reset()
 
         def work():
             try:
                 fn()
+            except jobs.Cancelled:
+                self._log("■ Stopped. Anything that finished is kept; Make clips picks up from here.")
+                with self._lock:
+                    for s in self._steps:
+                        if s["state"] == "active":
+                            s["state"] = "stopped"
             except Exception as e:
                 self._job_error = str(e)
                 self._log(f"✗ {e}")
@@ -207,7 +221,7 @@ class Api:
             "status_label": STATUS_LABEL.get(i["status"], i["status"]),
             "clips": by_iv.get(i["id"], 0), "duration": i.get("duration") or 0,
             "topic": i.get("topic") or "", "error": i.get("error") or "", "url": i.get("url") or "",
-        } for i in rows[:60]]
+        } for i in rows if i["status"] != "archived"][:60]
         used = {i["url"] for i in rows if i.get("url")}
         return {
             "cfg": cfg, "has_key": bool(config.get_api_key()),
@@ -218,7 +232,7 @@ class Api:
                        for s in ("suggested", "approved", "rendered", "scheduled", "posted")},
             "interviews": interviews,
             "news": news.load_news(cfg),
-            "picks": [p for p in news.load_picks(cfg) if p["url"] not in used][:6],
+            "picks": [dict(p, thumb=_yt_thumb(p["url"])) for p in pipeline.fresh_picks(cfg)][:8],
             "log_path": str(applog.path()),
             "version": updater.version(), "installed": updater.FROZEN,
             "data_dir": str(config.APP_DIR),
@@ -226,16 +240,55 @@ class Api:
 
     # ── home ────────────────────────────────────────────────────────────────
 
-    @exposed
-    def make_clips(self):
+    def _go(self, label, iid=None, ask=False):
         def job():
-            outs = pipeline.go(self._cfg, self._log, self._set_progress, self._step)
+            outs = pipeline.go(self._cfg, self._log, self._set_progress, self._step, iid=iid, ask=ask)
             if outs and self._cfg.get("open_folder_when_done"):
                 try:
                     util.open_path(pipeline.ready_dir(self._cfg))
                 except Exception:
                     pass
-        return self._start("Making clips", ["download", "transcribe", "analyze", "render"], job)
+        return self._start(label, ["download", "transcribe", "analyze", "render"], job)
+
+    @exposed
+    def make_clips(self):
+        return self._go("Making clips", ask=self._cfg.get("pick_mode", "ask") == "ask")
+
+    @exposed
+    def make_interview(self, iid):
+        """Make clips from one interview on Home (also how a failed one is retried)."""
+        iid = int(iid)
+        iv = db.get_interview(iid)
+        if not iv:
+            raise ValueError("That interview is no longer in the list.")
+        if iv["status"] == "error":
+            db.update_interview(iid, status="queued" if not iv["source_path"] else "downloaded",
+                                error="", attempts=0)
+        return self._go("Making clips", iid=iid)
+
+    @exposed
+    def make_from_pick(self, url):
+        with self._lock:
+            if self._busy:
+                raise RuntimeError("Something is already running. Stop it first, or queue this one.")
+        iid = pipeline.queue_pick(self._cfg, url)
+        self._bump()
+        return self._go("Making clips", iid=iid)
+
+    @exposed
+    def dismiss_pick(self, url):
+        news.dismiss(url)
+        self._bump()
+        return True
+
+    @exposed
+    def stop(self):
+        with self._lock:
+            if not self._busy:
+                return False
+        jobs.request()
+        self._log("Stopping…")
+        return True
 
     @exposed
     def run_interview(self, iid):
@@ -264,19 +317,59 @@ class Api:
 
     @exposed
     def queue_pick(self, url):
-        p = next((p for p in news.load_picks(self._cfg) if p["url"] == url), None)
-        if not p:
-            raise ValueError("That suggestion is no longer in the list.")
-        iid = ingest.add_url(self._cfg, p["url"], "None / unknown")
-        db.update_interview(iid, title=p["title"], pick_reason=p["why"], topic=p.get("topic", ""))
-        self._log(f"Queued {p['title']}")
+        iid = pipeline.queue_pick(self._cfg, url)
+        self._log(f"Queued {db.get_interview(iid)['title']}")
         self._bump()
         return iid
 
     @exposed
     def remove_interview(self, iid):
-        db.delete_interview(int(iid))
+        """Delete an interview: its row, suggestions and folder. Finished clips in Ready to post stay."""
+        iid = int(iid)
+        iv = db.get_interview(iid)
+        if not iv:
+            return 0
+        with self._lock:
+            if self._busy and self._label.startswith("Making"):
+                raise RuntimeError("Stop the current job before deleting an interview.")
+        freed = cleanup.delete_interview_files(self._cfg, iv)
+        finished = [c for c in db.list_clips(iid) if c["status"] in ("rendered", "scheduled", "posted")]
+        if finished:
+            # Keep finished clips (and their stats): hide the interview instead of deleting it.
+            for c in db.list_clips(iid):
+                if c not in finished:
+                    db.delete_clip(c["id"])
+            db.update_interview(iid, status="archived", source_path="")
+        else:
+            db.delete_interview(iid)
+        self._log(f"Deleted “{iv['title']}”" + (f", freed {freed / 1e9:.1f} GB" if freed > 5e7 else ""))
         self._bump()
+        return freed
+
+    @exposed
+    def storage(self):
+        return cleanup.usage(self._cfg)
+
+    @exposed
+    def cleanup_now(self):
+        def job():
+            n, freed = cleanup.run(self._cfg, self._log)
+            if not n:
+                self._log("Nothing old enough to clean up with the current settings.")
+        return self._start("Cleaning up", [], job)
+
+    def _cleanup_bg(self):
+        try:
+            cleanup.run(self._cfg, self._log)
+        except Exception as e:
+            applog.write(f"Startup cleanup failed: {e}")
+
+    @exposed
+    def open_url(self, url):
+        import webbrowser
+        if not str(url).startswith("https://"):
+            raise ValueError("Not a web link.")
+        webbrowser.open(url)
         return True
 
     @exposed
@@ -296,8 +389,10 @@ class Api:
 
         def job():
             self._step("news", "active")
-            n = news.load_news(self._cfg) if news.news_is_fresh(self._cfg) else news.scout(self._cfg, self._log)
-            news.discover(self._cfg, n, self._log)
+            if not news.news_is_fresh(self._cfg):
+                news.scout(self._cfg, self._log)
+            found = pipeline.find_candidates(self._cfg, self._log, more=True)
+            self._log(f"☞ {len(found)} interviews to choose from under Found interviews.")
         return self._start("Finding interviews", ["news"], job)
 
     @exposed
@@ -524,6 +619,8 @@ class Api:
             util.open_path(pipeline.ready_dir(self._cfg))
         elif which == "data":
             util.open_path(config.APP_DIR)
+        elif which == "workspace":
+            util.open_path(self._cfg["workspace"])
         elif which == "interview" and iid:
             util.open_path(db.get_interview(int(iid))["workdir"])
         return True

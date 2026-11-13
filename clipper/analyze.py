@@ -12,13 +12,24 @@ from . import config, db, llm, signals, transcribe, util
 EDITORIAL = """You pick TikTok clips from pro wrestling interviews (shoot interviews, podcasts, sit-downs like
 Chris Van Vliet or Inside the Ropes) for a wrestling TikTok channel.
 
-What wins, in order:
-0. Timeliness. If a moment connects to something in CURRENT TOPICS, it jumps the queue: name the
-   connection in "timely", and let the hook/caption make it obvious why this matters this week.
-1. Crossover appeal. Clips that land with someone who has never watched wrestling beat niche clips. Fights, firings, feuds, insults with a punchline, "wrestling is real" moments, funny stories with a clean payoff.
-2. Clip architecture over raw quote quality. A story with setup, escalation and a payoff beats a sharper line with no arc. A single devastating line can stand alone if it needs zero context.
-3. Named names. More recognizable wrestlers named in the clip = more search traffic.
-4. Unexpected tone shifts (comedy to serious, calm delivery of something wild).
+The channel is built on STORIES: anecdotes told by someone who was there. What wins, in order:
+1. A real story. Something happened, with a setup, escalation and a payoff: a backstage fight, a
+   rib that went wrong, a firing, a road trip, a confrontation with a boss, how a famous moment
+   really came together. The viewer should be able to retell it afterwards. Era doesn't matter;
+   a current star's story counts as much as an old-timer's. Opinions, rankings, hot takes,
+   news reactions and promo-style talk are weaker than any decent story; include one only if
+   it's exceptional, and rate it lower.
+2. Crossover appeal. Stories that land with someone who has never watched wrestling beat inside
+   baseball: fights, firings, feuds, insults with a punchline, "wrestling is real" moments,
+   funny stories with a clean payoff.
+3. Timeliness as a boost. If a story connects to something in CURRENT TOPICS, name it in
+   "timely" and let the hook/caption make the connection obvious. Timeliness lifts a good story;
+   it doesn't rescue a weak one.
+4. Named names. More recognizable wrestlers in the story = more search traffic.
+5. Unexpected tone shifts (comedy to serious, calm delivery of something wild).
+
+rating: 5 = a complete, surprising story a non-fan would watch to the end; 4 = a strong story
+with a clear payoff; 3 = a decent story or an exceptional opinion; 2 or below, leave it out.
 
 Rules:
 - Use the transcript timestamps. start = the first word of the clip, end = the last word. Do not start mid-sentence or cut before a punchline lands.
@@ -61,14 +72,15 @@ CLIP_SCHEMA = {
                     "speaker": {"type": "string", "description": "full name of who is talking in this clip"},
                     "start": {"type": "number", "description": "seconds"},
                     "end": {"type": "number", "description": "seconds"},
-                    "rating": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "rating": {"type": "integer", "minimum": 1, "maximum": 5,
+                               "description": "story strength, per the rating guide"},
                     "crossover": {"type": "boolean"},
                     "hook": {"type": "string"},
                     "context_card": {"type": "string"},
                     "caption": {"type": "string"},
                     "hashtags": {"type": "array", "items": {"type": "string"}},
                     "framing": {"type": "string", "enum": ["face", "wide"]},
-                    "why": {"type": "string", "description": "one or two sentences on why it works"},
+                    "why": {"type": "string", "description": "one or two sentences: the story in brief and why it works"},
                     "flags": {"type": "array", "items": {"type": "string"}},
                     "series": {"type": "string"},
                     "timely": {"type": "string", "description": "current topic this connects to, or ''"},

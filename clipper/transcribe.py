@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-from . import applog, config, util
+from . import applog, config, jobs, util
 
 _TOKEN = re.compile(r"[^\w']+")
 
@@ -147,15 +147,13 @@ def ensure_model(name, log, progress=None):
 def load_audio(media_path, sr=16000):
     """Decode any audio/video file to 16 kHz mono float32 with the bundled ffmpeg.
     (faster-whisper's own decoder depends on PyAV versions that keep changing.)"""
-    import subprocess
     import numpy as np
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(media_path), "-vn", "-ac", "1",
-           "-ar", str(sr), "-f", "f32le", "-"]
-    r = subprocess.run(cmd, capture_output=True, creationflags=util.NO_WINDOW)
-    if r.returncode != 0 or not r.stdout:
-        err = r.stderr.decode("utf-8", "replace").strip().splitlines()
-        raise RuntimeError(f"Couldn't read the audio ({err[-1] if err else 'no audio track'})")
-    return np.frombuffer(r.stdout, np.float32)
+    code, out, err = util.run_bytes(["ffmpeg", "-nostdin", "-v", "error", "-i", str(media_path),
+                                     "-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"])
+    if code != 0 or not out:
+        lines = err.decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError(f"Couldn't read the audio ({lines[-1] if lines else 'no audio track'})")
+    return np.frombuffer(out, np.float32)
 
 
 def transcribe(media_path, title, out_dir, cfg, log, progress=None):
@@ -191,6 +189,7 @@ def transcribe(media_path, title, out_dir, cfg, log, progress=None):
     duration = info.duration or 0
     segments = []
     for seg in segments_iter:
+        jobs.check()
         words = [{"w": w.word.strip(), "s": round(w.start, 3), "e": round(w.end, 3)}
                  for w in (seg.words or []) if w.word.strip()]
         words = apply_fixes(words, fixes)

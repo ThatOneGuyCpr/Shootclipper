@@ -10,11 +10,9 @@ from . import util
 
 
 def energy_map(media_path, out_dir, window=10.0):
-    import subprocess
     sr = 8000
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(media_path), "-vn", "-ac", "1",
-                          "-ar", str(sr), "-f", "s16le", "-"], capture_output=True,
-                         creationflags=util.NO_WINDOW).stdout
+    _, raw, _ = util.run_bytes(["ffmpeg", "-v", "error", "-i", str(media_path), "-vn", "-ac", "1",
+                                "-ar", str(sr), "-f", "s16le", "-"])
     audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
     _write_peaks(audio, sr, out_dir)
     n = int(sr * window)
@@ -56,11 +54,9 @@ def load_peaks(media_path, out_dir):
     """Waveform for the timeline; computed on first use for interviews prepared before this existed."""
     p = Path(out_dir) / "peaks.json"
     if not p.exists():
-        import subprocess
         sr = 8000
-        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(media_path), "-vn", "-ac", "1",
-                              "-ar", str(sr), "-f", "s16le", "-"], capture_output=True,
-                             creationflags=util.NO_WINDOW).stdout
+        _, raw, _ = util.run_bytes(["ffmpeg", "-v", "error", "-i", str(media_path), "-vn", "-ac", "1",
+                                    "-ar", str(sr), "-f", "s16le", "-"])
         _write_peaks(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0, sr, out_dir)
     return json.loads(p.read_text())
 

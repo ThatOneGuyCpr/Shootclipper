@@ -29,6 +29,7 @@ const ICONS = {
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/>',
   play: '<path d="M7 4.5v15l12-7.5z"/>',
   pause: '<path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
 };
 function paintIcons(root = document) {
   $$("[data-ico]", root).forEach(el => { el.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[el.dataset.ico] || ""}</svg>`; });
@@ -138,7 +139,9 @@ async function poll() {
   }
   $("#sbDot").className = "dot" + (p.busy ? " busy" : p.error ? " err" : "");
   $("#sbLabel").textContent = p.busy ? p.label : p.error ? "Stopped with an error" : "Idle";
-  $("#goBtn").disabled = p.busy;
+  setGoButton(p.busy, p.label);
+  $("#stopBtn").hidden = !p.busy;
+  $$('[data-make], [data-act="make"]').forEach(b => { b.disabled = p.busy; });
   const upd = $("#updBtn");
   upd.hidden = !p.update || p.busy;
   if (p.update) upd.textContent = `Update to ${p.update}`;
@@ -155,12 +158,32 @@ async function poll() {
 }
 
 // ── HOME ───────────────────────────────────────────────────────────────────
+function setGoButton(busy, label) {
+  const b = $("#goBtn");
+  const want = busy ? "stop" : "go";
+  if (b.dataset.state === want) return;
+  b.dataset.state = want;
+  b.classList.toggle("primary", !busy);
+  b.classList.toggle("stop", busy);
+  b.innerHTML = busy ? `<span class="ico" data-ico="stop"></span>Stop` : `<span class="ico" data-ico="play"></span>Make clips`;
+  b.title = busy ? `Stop ${(label || "the current job").toLowerCase()}. Anything that finished is kept.` : "";
+  paintIcons(b);
+}
+async function stopJob() {
+  await attempt(() => call("stop"));
+}
+function views(n) {
+  if (!n) return "";
+  return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M views` : n >= 1e3 ? `${Math.round(n / 1e3)}K views` : `${n} views`;
+}
 async function loadHome() {
   const st = await attempt(() => call("get_state"));
   if (!st) return;
   S.st = st;
   const c = st.counts, cfg = st.cfg;
-  const mode = cfg.analysis_mode === "api" ? "Picks interviews and clips on its own." : "Paste mode: queue a link, then copy the packet into your Claude Project.";
+  const mode = cfg.analysis_mode !== "api" ? "Paste mode: queue a link, then copy the packet into your Claude Project."
+    : cfg.pick_mode === "ask" ? "Finishes anything you've queued; otherwise finds interviews for you to choose from."
+    : "Picks interviews and clips on its own.";
   const warn = !st.ffmpeg ? "ffmpeg is missing. Install it, then restart. " : (cfg.analysis_mode === "api" && !st.has_key ? "Add your API key in Settings to start. " : "");
   $("#heroHint").textContent = `${warn}${mode} Renders the best ${cfg.auto_clips} from the next interview. ${c.rendered} ready to post, ${c.scheduled} scheduled.`;
   const sel = $("#presetSel");
@@ -174,15 +197,24 @@ async function loadHome() {
     let actions = "";
     if (i.status === "needs_paste") actions = `<button class="btn sm" data-act="packet" data-id="${i.id}">Copy packet</button><button class="btn sm" data-act="paste" data-id="${i.id}">Paste reply</button>`;
     else if (i.status === "analyzed" || i.status === "done") actions = `<button class="btn sm" data-act="review" data-id="${i.id}">Review</button>`;
-    else actions = `<button class="btn sm" data-act="run" data-id="${i.id}">${i.status === "error" ? "Retry" : "Run"}</button>`;
-    actions += `<button class="btn sm" data-act="folder" data-id="${i.id}" title="Open this interview's folder">Folder</button><button class="btn sm" data-act="remove" data-id="${i.id}" title="Remove from the list">Remove</button>`;
+    else actions = `<button class="btn sm" data-act="make" data-id="${i.id}" title="Download, transcribe, pick clips and render the best ones">${i.status === "error" ? "Try again" : "Make clips"}</button>`;
+    actions += `<button class="btn sm" data-act="folder" data-id="${i.id}" title="Open this interview's folder">Folder</button><button class="btn sm danger" data-act="remove" data-id="${i.id}" title="Delete this interview and its downloaded files">Delete</button>`;
     const meta = [`<span class="chip ${chip}">${esc(i.status_label)}</span>`];
     if (i.clips) meta.push(`<span>${i.clips} clip${i.clips === 1 ? "" : "s"}</span>`);
     if (i.duration) meta.push(`<span>${fmt(i.duration)}</span>`);
     if (i.topic) meta.push(`<span>For: ${esc(i.topic)}</span>`);
     if (i.status === "error" && i.error) meta.push(`<span class="iv-err" title="${esc(i.error)}">${esc(i.error)}</span>`);
     return `<div class="iv"><div class="iv-title" title="${esc(i.title)}">${esc(i.title)}</div><div class="iv-meta">${meta.join("")}</div><div class="iv-actions">${actions}</div></div>`;
-  }).join("") : `<div class="empty">No interviews yet. Make clips finds a timely one on its own, or paste a link above to choose the source yourself.</div>`;
+  }).join("") : `<div class="empty">Nothing here yet. Pick one under Found interviews, or paste a link above.</div>`;
+
+  $("#foundList").innerHTML = st.picks.length ? st.picks.map(p => {
+    const meta = [p.channel, views(p.views), p.topic ? `For: ${p.topic}` : ""].filter(Boolean).join(", ");
+    return `<div class="found">
+      <button class="found-thumb" data-watch="${esc(p.url)}" title="Watch on YouTube">${p.thumb ? `<img src="${esc(p.thumb)}" alt="" loading="lazy" onerror="this.remove()">` : ""}<span class="len">${fmt(p.duration || 0)}</span></button>
+      <div class="found-body"><div class="found-title" title="${esc(p.title)}">${esc(p.title)}</div><div class="found-meta">${esc(meta)}</div><p class="found-why">${esc(p.why)}</p></div>
+      <div class="found-actions"><button class="btn sm primary" data-make="${esc(p.url)}">Make clips</button><div class="row"><button class="btn sm" data-pick="${esc(p.url)}" title="Add to Your interviews for later">Queue</button><button class="btn sm" data-dismiss="${esc(p.url)}" title="Don't suggest this again">Not this</button></div></div>
+    </div>`;
+  }).join("") : `<div class="empty">${cfg.analysis_mode === "api" ? "Press Make clips or Find more and Shoot Clipper searches YouTube for interviews full of stories, tied to this week's news. You pick which one becomes clips." : "Finding interviews needs API mode (Settings). In Paste mode, paste a link above."}</div>`;
 
   const n = st.news;
   let html = "";
@@ -193,11 +225,8 @@ async function loadHome() {
   } else {
     html += `<div class="empty">No news yet. In API mode, Make clips checks what fans are talking about before it picks an interview. Refresh runs that check now.</div>`;
   }
-  if (st.picks.length) {
-    html += `<div class="sub-h">Suggested interviews</div>` + st.picks.map(p =>
-      `<div class="pick"><b>${esc(p.title)}</b><p>${esc(p.channel)}, ${Math.round(p.duration / 60)} min. ${esc(p.why)}</p><button class="btn sm" data-pick="${esc(p.url)}">Queue</button></div>`).join("");
-  }
   $("#newsList").innerHTML = html;
+  $$('[data-make], [data-act="make"]').forEach(b => { b.disabled = S.busy; });
 }
 function setBadge(view, n) {
   const b = $(`.rail-btn[data-view="${view}"]`);
@@ -207,7 +236,8 @@ function setBadge(view, n) {
   el.textContent = n;
 }
 function wireHome() {
-  $("#goBtn").onclick = () => attempt(() => call("make_clips"));
+  $("#goBtn").onclick = () => S.busy ? stopJob() : attempt(() => call("make_clips"));
+  $("#stopBtn").onclick = stopJob;
   const add = async () => {
     const v = $("#urlInput").value;
     if (await attempt(() => call("add_url", v, $("#presetSel").value), "Queued. Make clips will use it next.")) $("#urlInput").value = "";
@@ -217,18 +247,22 @@ function wireHome() {
   $("#addFilesBtn").onclick = () => attempt(() => call("add_files", $("#presetSel").value));
   $("#scoutBtn").onclick = () => attempt(() => call("scout_news"));
   $("#discoverBtn").onclick = () => attempt(() => call("discover"));
-  $("#newsList").onclick = e => {
-    const b = e.target.closest("[data-pick]");
-    if (b) attempt(() => call("queue_pick", b.dataset.pick), "Queued");
+  $("#foundList").onclick = e => {
+    const b = e.target.closest("[data-make],[data-pick],[data-dismiss],[data-watch]");
+    if (!b) return;
+    if (b.dataset.make) attempt(() => call("make_from_pick", b.dataset.make));
+    else if (b.dataset.pick) attempt(() => call("queue_pick", b.dataset.pick), "Queued under Your interviews");
+    else if (b.dataset.dismiss) { b.closest(".found").remove(); attempt(() => call("dismiss_pick", b.dataset.dismiss)); }
+    else if (b.dataset.watch) attempt(() => call("open_url", b.dataset.watch));
   };
   $("#ivList").onclick = async e => {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const id = +b.dataset.id, act = b.dataset.act;
-    if (act === "run") attempt(() => call("run_interview", id));
+    if (act === "make") attempt(() => call("make_interview", id));
     else if (act === "folder") attempt(() => call("open_folder", "interview", id));
     else if (act === "review") { R.cid = null; R.wantIv = id; show("review"); }
-    else if (act === "remove") { if (confirm("Remove this interview and its suggestions from the list? Rendered files stay on disk.")) attempt(() => call("remove_interview", id)); }
+    else if (act === "remove") { if (confirm("Delete this interview and its downloaded video and transcript? Finished clips stay in Library.")) attempt(() => call("remove_interview", id)); }
     else if (act === "packet") {
       const p = await attempt(() => call("packet", id));
       if (p) { await copy(p.text); toast("Packet copied. Paste it into your Claude Project."); }
@@ -613,6 +647,7 @@ const SETTINGS = [
     { custom: "paste_news" },
   ]],
   ["Make clips", [
+    { key: "pick_mode", label: "Choosing interviews", type: "select", options: [["ask", "Show me what it found, I pick"], ["auto", "Pick the best one automatically"]], hint: "Queued interviews always go first. The daily run always picks automatically." },
     { key: "auto_clips", label: "Clips per interview", type: "number", hint: "How many Make clips renders from each interview." },
     { key: "auto_min_rating", label: "Lowest rating to render", type: "number", unit: "of 5", hint: "If nothing rates this high, the single best clip is rendered." },
     { key: "open_folder_when_done", label: "Open the folder when done", type: "bool" },
@@ -646,6 +681,11 @@ const SETTINGS = [
     { key: "workspace", label: "Workspace folder", type: "folder", hint: "Downloads, transcripts and finished clips live here." },
     { custom: "files" },
   ]],
+  ["Storage", [
+    { custom: "storage" },
+    { key: "cleanup_downloads_days", label: "Delete interview videos", type: "select", options: [["0", "Never"], ["3", "3 days after clips are made"], ["7", "A week after clips are made"], ["14", "2 weeks after clips are made"], ["30", "A month after clips are made"]], hint: "Checked when the app opens and after each Make clips. Transcripts stay, and a video downloads again by itself if you re-render one of its clips." },
+    { key: "cleanup_clips_days", label: "Delete finished clips", type: "select", options: [["0", "Never"], ["14", "2 weeks after rendering"], ["30", "A month after rendering"], ["60", "2 months after rendering"], ["90", "3 months after rendering"]], hint: "Scheduled clips are never deleted. Posted clips keep their view counts in History." },
+  ]],
   ["Updates", [
     { custom: "update" },
   ]],
@@ -653,6 +693,13 @@ const SETTINGS = [
     { key: "theme", label: "Theme", type: "select", options: [["system", "Match Windows"], ["light", "Light"], ["dark", "Dark"]] },
   ]],
 ];
+function gb(b) { return b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`; }
+async function loadStorage() {
+  const u = await attempt(() => call("storage"));
+  const el = $("#storageUse");
+  if (!u || !el) return;
+  el.textContent = `Interview videos ${gb(u.downloads)} (${u.n_downloads}), finished clips ${gb(u.clips)} (${u.n_clips})`;
+}
 async function loadSettings() {
   const st = await attempt(() => call("get_state"));
   if (!st) return;
@@ -666,6 +713,7 @@ async function loadSettings() {
     if (f.custom === "update") return st.installed
       ? `<div class="set-row"><span class="lbl">Version</span><span class="ctl"><span>${esc(st.version || "unknown")}</span><button class="btn" id="checkUpdate">Check for updates</button></span><span class="hint">Shoot Clipper checks when it opens and shows Update in the bottom bar when there's a new version. Settings, your library and your lists carry over.</span></div>`
       : `<div class="set-row"><span class="lbl">Version</span><span class="ctl"><span>${esc(st.version || "unknown")}</span><button class="btn" id="installUpdate">Install update…</button></span><span class="hint">Pick the ShootClipper.zip you downloaded. Settings, your library and your lists stay as they are; the app restarts when it's done.</span></div>`;
+    if (f.custom === "storage") return `<div class="set-row span"><span class="lbl">Space used</span><span class="ctl"><span id="storageUse" class="nowrap">Measuring…</span><button class="btn" id="cleanNow" title="Apply the rules below now. Old files are also cleaned when the app opens and after each Make clips.">Clean up now</button><button class="btn" id="openWs">Open folder</button></span></div>`;
     if (f.custom === "files") return `<div class="set-row span"><span class="lbl">Lists and logs</span><span class="ctl"><button class="btn" data-file="sources">Source presets</button><button class="btn" data-file="channels">Preferred channels</button><button class="btn" data-file="blocked">Blocked channels</button><button class="btn" data-file="log">Open app log</button><button class="btn" id="openData">Open data folder</button></span></div>`;
     const v = cfg[f.key];
     let ctl = "";
@@ -680,6 +728,7 @@ async function loadSettings() {
     return `<div class="set-row"><span class="lbl">${f.label}</span><span class="ctl">${ctl}</span><span class="hint">${f.hint || ""}</span></div>`;
   };
   $("#settingsBody").innerHTML = SETTINGS.map(([title, fields]) => `<section class="panel set-group"><header class="ph"><h2>${title}</h2></header><div class="set-rows">${fields.map(row).join("")}</div></section>`).join("");
+  loadStorage();
 }
 async function saveSetting(key, value) {
   const cfg = await attempt(() => call("save_settings", { [key]: value }), "Saved");
@@ -701,6 +750,8 @@ function wireSettings() {
     if (br) { const p = await attempt(() => call("choose_folder", br.dataset.browse)); if (p) { $(`[data-key="${br.dataset.browse}"]`, body).value = p; saveSetting(br.dataset.browse, p); } return; }
     const f = t.closest("[data-file]");
     if (f) return attempt(() => call("edit_data_file", f.dataset.file));
+    if (t.id === "cleanNow") { await attempt(() => call("cleanup_now")); setTimeout(loadStorage, 1500); return; }
+    if (t.id === "openWs") return attempt(() => call("open_folder", "workspace"));
     if (t.id === "checkUpdate") {
       const info = await attempt(() => call("check_update"));
       if (!info) return;

@@ -51,6 +51,9 @@ DEFAULTS = {
     "theme": "system",               # system | light | dark
     "config_version": 2,
     "framing_mode": "split when matched",  # split when matched | alternate (A/B test) | face only
+    "pick_mode": "ask",              # ask = Make clips shows found interviews to choose from; auto = picks
+    "cleanup_downloads_days": 7,     # delete downloaded interview videos this long after clips are made (0 = never)
+    "cleanup_clips_days": 30,        # delete finished clip videos this long after rendering (0 = never)
 }
 
 # Prices per million tokens (input, output), from Anthropic's pricing page, Nov 2026.

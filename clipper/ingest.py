@@ -1,7 +1,7 @@
 """Getting source media into the workspace: YouTube links or local files."""
 from pathlib import Path
 
-from . import db, util
+from . import db, jobs, util
 
 
 def make_workdir(workspace, iid, title):
@@ -35,6 +35,7 @@ def download(interview, log):
     last = {"pct": -10}
 
     def hook(d):
+        jobs.check()  # Stop pressed: abort the download (the partial file resumes next time)
         if d.get("status") == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             if total:
@@ -54,7 +55,11 @@ def download(interview, log):
         "progress_hooks": [hook],
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(interview["url"], download=True)
+        try:
+            info = ydl.extract_info(interview["url"], download=True)
+        except Exception:
+            jobs.check()
+            raise
         title = info.get("title") or "interview"
     path = next((p for p in wd.glob("source.*") if p.suffix.lower() in
                  (".mp4", ".mkv", ".webm", ".mov")), None)

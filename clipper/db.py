@@ -53,6 +53,8 @@ def init():
         for col in ("pick_reason", "topic", "source_label"):
             if col not in cols:
                 c.execute(f"ALTER TABLE interviews ADD COLUMN {col} TEXT DEFAULT ''")
+        if "attempts" not in cols:
+            c.execute("ALTER TABLE interviews ADD COLUMN attempts INTEGER DEFAULT 0")
         ccols = {r[1] for r in c.execute("PRAGMA table_info(clips)")}
         for col in ("gameplay", "gameplay_hint", "speaker"):
             if col not in ccols:
@@ -95,6 +97,10 @@ def get_interview(iid):
 
 def list_interviews():
     return _rows("SELECT * FROM interviews ORDER BY id DESC")
+
+
+def delete_clip(cid):
+    _exec("DELETE FROM clips WHERE id=?", (cid,))
 
 
 def delete_interview(iid):

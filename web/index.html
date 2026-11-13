@@ -39,15 +39,21 @@
               <button class="btn" id="addUrlBtn">Add link</button>
               <button class="btn" id="addFilesBtn">Add files</button>
             </div>
+            <div class="panel grow found-panel">
+              <header class="ph"><h2>Found interviews</h2>
+                <div class="ph-actions"><button class="btn sm" id="discoverBtn">Find more</button></div>
+              </header>
+              <div class="scroll" id="foundList"></div>
+            </div>
             <div class="panel grow">
-              <header class="ph"><h2>Interviews</h2><span class="ph-note" id="ivCount"></span></header>
+              <header class="ph"><h2>Your interviews</h2><span class="ph-note" id="ivCount"></span></header>
               <div class="scroll" id="ivList"></div>
             </div>
           </div>
           <div class="col">
             <div class="panel grow">
               <header class="ph"><h2>This week in wrestling</h2>
-                <div class="ph-actions"><button class="btn sm" id="scoutBtn">Refresh</button><button class="btn sm" id="discoverBtn">Find interviews</button></div>
+                <div class="ph-actions"><button class="btn sm" id="scoutBtn">Refresh</button></div>
               </header>
               <div class="scroll" id="newsList"></div>
             </div>
@@ -164,6 +170,7 @@
       <span id="sbLabel">Idle</span>
       <span class="sb-steps" id="sbSteps"></span>
       <span class="sb-last" id="sbLast"></span>
+      <button class="sb-btn sb-stop" id="stopBtn" hidden>Stop</button>
       <button class="sb-btn sb-update" id="updBtn" hidden></button>
       <button class="sb-btn" id="logBtn" aria-expanded="false">Log</button>
     </footer>

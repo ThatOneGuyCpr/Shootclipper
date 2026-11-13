@@ -12,13 +12,27 @@ NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
 
 
 def run(cmd, cwd=None, check=True):
-    """Run a command, return CompletedProcess. Raises with stderr tail on failure."""
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+    """Run a command, return CompletedProcess. Raises with stderr tail on failure.
+    Killed (raising jobs.Cancelled) if Stop is pressed while it runs."""
+    from . import jobs
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+                            errors="replace", creationflags=NO_WINDOW)
+    out, err = jobs.communicate(proc)
+    p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     if check and p.returncode != 0:
         tail = (p.stderr or "")[-1500:]
         raise RuntimeError(f"{os.path.basename(cmd[0])} failed:\n{tail}")
     return p
+
+
+def run_bytes(cmd):
+    """Run a command and return its stdout as bytes (stops with jobs.Cancelled on Stop)."""
+    from . import jobs
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+    out, err = jobs.communicate(proc)
+    return proc.returncode, out, err
 
 
 def popen(cmd, **kw):

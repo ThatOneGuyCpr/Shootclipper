@@ -9,7 +9,7 @@ import json
 import re
 from pathlib import Path
 
-from . import config, db, llm
+from . import config, db, jobs, llm
 
 WEB_SEARCH_TOOL = {"type": "web_search_20260318", "name": "web_search", "max_uses": 5,
                    "response_inclusion": "excluded"}
@@ -71,9 +71,9 @@ quotes making headlines. Prefer reputable wrestling news outlets.
 Finish with a plain-text list of 6-10 topics, ranked by how much an interview clip about them
 would ride current attention. For each give: a short label, why it matters right now (with dates),
 the people involved, urgency 1-5 (5 = peaks in the next few days), the peak date if there is one,
-and 2-3 YouTube searches that would find INTERVIEWS where someone talks about the people involved
-(old interviews count if they're newly relevant). Avoid searches that would surface official
-match footage."""
+and 2-3 YouTube searches that would find long INTERVIEWS where someone tells stories about the
+people involved (shoot interviews, podcast sit-downs; old interviews count if they're newly
+relevant). Avoid searches that would surface official match footage, news recaps or reactions."""
 
 STRUCTURE_PROMPT = """Today is {today}. Convert these research notes into the topic list, keeping
 the order and every topic. Use '' for peak_date when none is given.
@@ -84,11 +84,20 @@ NOTES:
 RANK_PROMPT = """Today is {today}. Pick the YouTube videos most worth clipping for a wrestling TikTok
 channel this week.
 
-What makes a strong pick: an interview or podcast (not match footage, not a news recap channel
-reading headlines) where someone with firsthand knowledge talks about a person or story that is
-currently in the news; candid storytelling; recognizable names; a length long enough to hold stories
-(10+ minutes ideal). Channels that tend to be stronger sources: {channels}.
+The channel posts STORIES: anecdotes told by someone who was there (backstage fights, ribs,
+firings, road stories, run-ins with bosses, how famous moments really happened). Any era; a
+current star telling stories is as good as a legend.
+
+What makes a strong pick, in order:
+1. Long-form storytelling: a shoot interview, podcast sit-down or career-retrospective
+   conversation where the guest tells stories firsthand. Titles and channels that suggest
+   "stories", "backstage", "the truth about", "career", "untold" are good signs.
+2. A connection to a person or story currently in the news (a boost, not a requirement).
+3. Recognizable names, and enough length to hold several stories (20+ minutes ideal).
+Weak picks: news recap channels reading headlines, reaction videos, predictions, fantasy
+booking, panel debates, match footage, promo clips. Stronger channels: {channels}.
 Prefer videos that have NOT already been clipped by the channel.
+In "why", say what stories the video likely holds.
 
 CURRENT TOPICS:
 {topics}
@@ -216,13 +225,14 @@ def discover(cfg, news, log):
     """Stages 2 and 3. Returns ranked picks and saves them to picks.json."""
     blocked = [b.lower() for b in _load_list("blocked_channels.txt")]
     preferred = _load_list("channels.txt")
-    done = {i["url"] for i in db.list_interviews() if i.get("url")}
+    done = {i["url"] for i in db.list_interviews() if i.get("url")} | dismissed()
     cands, seen = [], set()
     topics = sorted(news.get("topics", []), key=lambda t: -t.get("urgency", 0))[:6]
     log(f"   searching YouTube for {len(topics)} topics…")
     for t in topics:
         for q in t.get("youtube_queries", [])[:2]:
             try:
+                jobs.check()
                 for c in youtube_search(q):
                     if c["url"] in seen or c["url"] in done:
                         continue
@@ -233,6 +243,8 @@ def discover(cfg, news, log):
                     seen.add(c["url"])
                     c["found_for"] = t["topic"]
                     cands.append(c)
+            except jobs.Cancelled:
+                raise
             except Exception as e:
                 log(f"   search failed for '{q}': {str(e)[:80]}")
     if not cands:
@@ -250,7 +262,7 @@ def discover(cfg, news, log):
             topics=topics_text(news), candidates="\n".join(lines))}])
     picks = result.get("picks", [])
     by_url = {c["url"]: c for c in cands}
-    picks = [dict(p, **{k: by_url[p["url"]][k] for k in ("title", "channel", "duration")})
+    picks = [dict(p, **{k: by_url[p["url"]].get(k, 0) for k in ("title", "channel", "duration", "views")})
              for p in picks if p["url"] in by_url]
     cost = sum(_cost(model, r.usage) for r in responses)
     log(f"   {len(picks)} picks, about ${cost:.3f}")
@@ -261,6 +273,25 @@ def discover(cfg, news, log):
 def load_picks(cfg):
     p = Path(cfg["workspace"]) / "picks.json"
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+
+
+def _dismissed_path():
+    return config.APP_DIR / "dismissed.json"
+
+
+def dismissed(cfg=None):
+    """URLs you turned down with Not this. They never come back as found interviews."""
+    p = _dismissed_path()
+    try:
+        return set(json.loads(p.read_text(encoding="utf-8"))) if p.exists() else set()
+    except Exception:
+        return set()
+
+
+def dismiss(url):
+    urls = dismissed()
+    urls.add(url)
+    _dismissed_path().write_text(json.dumps(sorted(urls), indent=1), encoding="utf-8")
 
 
 def scout_packet():

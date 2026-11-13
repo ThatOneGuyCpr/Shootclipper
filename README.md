@@ -17,16 +17,28 @@ The first transcription downloads the Whisper model (about 0.5 GB on CPU, 1.6 GB
 
 ## Daily use
 
-**Make clips** does all of this in one go:
+**Make clips** finishes anything you've queued first (including an interview that stopped with an error; it gets two more tries before it waits for you). With nothing queued, it checks this week's wrestling news, searches YouTube for interviews full of stories, and lists them under **Found interviews** on Home. Each one shows a thumbnail (click it to watch on YouTube), the channel, views, and what stories it likely holds. Press **Make clips** on the one you want; **Queue** saves it for later, and **Not this** hides it for good. **Find more** searches again.
 
-1. Checks this week's wrestling news (refreshed every 2 days by default).
-2. Picks the next interview: anything you queued yourself goes first; otherwise it searches YouTube for interviews tied to current topics and picks the best one.
-3. Downloads, transcribes, and sends the transcript plus a contact sheet of frames to Claude.
-4. Renders the top clips (2 by default) and opens the folder.
+Once an interview is chosen, it downloads, transcribes, has Claude pick the best stories, renders the top clips (2 by default) and opens the folder. Then you watch them, tweak anything in **Review** if needed, and upload.
 
-Then you watch them, tweak anything in **Review** if needed, and upload.
+Prefer the old behavior? Settings > Make clips > **Choosing interviews** > Pick the best one automatically. The daily run always picks on its own.
+
+**Stop**: while anything runs, Make clips turns into **Stop** (there's one in the bottom bar too). Whatever finished is kept, so a stopped transcription starts over but a finished download doesn't, and Make clips picks up from there.
 
 To use a specific video, paste its link on **Home** (or **Add files…**), choose its source preset if it has a burned-in watermark, and press Make clips.
+
+## What it looks for
+
+Stories come first: anecdotes told by someone who was there, with a setup and a payoff (backstage fights, ribs, firings, road stories, how a famous moment really happened). Any era counts. Timeliness gives a good story a boost but doesn't rescue a weak one, and opinions, hot takes and news reactions rank below a decent story.
+
+## Storage
+
+Settings > **Storage** shows how much space interview videos and finished clips take, with two rules:
+
+- **Delete interview videos** (default: a week after clips are made). Transcripts stay, and if you re-render one of its clips later, the video downloads again by itself.
+- **Delete finished clips** (default: a month after rendering). Scheduled clips are never deleted; posted clips keep their view counts in History.
+
+Rules run when the app opens and after each Make clips; **Clean up now** runs them immediately. **Delete** on an interview in Home removes it with its download and transcript (finished clips stay in Library). Videos you added from your own folders are never deleted.
 
 ## The screens
 
