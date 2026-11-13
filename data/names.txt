@@ -1,0 +1,93 @@
+# One name or term per line. These get fed to Whisper as spelling hints.
+# Names that appear in an interview's title are always sent first.
+# Add nicknames after '=' so 2K files named 'HBK vs Cornette' still match: Shawn Michaels = HBK
+CM Punk
+Jim Cornette = Cornette
+Vince Russo
+Vince McMahon
+Eric Bischoff
+Shawn Michaels = HBK, Heartbreak Kid
+Triple H = HHH
+Bret Hart
+Kevin Nash
+Scott Hall
+Kevin Owens = Kevin Steen, KO
+Rey Mysterio
+AJ Styles
+Teddy Hart
+Simon Gotch
+Aiden English
+Enzo Amore
+Big Cass
+Dusty Rhodes
+Michael Cole
+Jim Ross
+John Laurinaitis = Johnny Ace, Laurinaitis
+Tammy Sytch = Sunny
+Chris Candido
+Davey Boy Smith
+Road Warrior Hawk
+Road Warrior Animal
+Bam Bam Bigelow
+Haku = Meng
+Stevie Ray
+Booker T
+Harlem Heat
+Sid Vicious
+Scott Steiner
+Rick Steiner
+Rob Van Dam = RVD
+Sabu
+Paul Heyman
+Tommy Dreamer
+Road Dogg
+Billy Gunn = Kip James
+New Age Outlaws
+Mark Henry
+Chris Jericho
+Jesse Ventura = Ventura
+Santino Marella
+The Godfather
+Ken Anderson = Mr. Kennedy
+Kurt Angle
+Jeff Jarrett
+Steve Austin = Stone Cold
+Batista
+Randy Orton
+John Cena
+Brock Lesnar
+Kalisto
+Manny Fernandez
+Colt Cabana
+Gabe Sapolsky
+Samoa Joe
+Finn Balor
+Chad Gable
+Jason Jordan
+Kevin Dunn
+Bill Watts
+Waldo Von Erich
+Danny Davis
+The Undertaker = Undertaker, Taker
+Andre the Giant
+Ric Flair
+Hulk Hogan = Hogan, Hollywood Hogan
+Randy Savage
+Ultimate Warrior
+Eddie Guerrero
+Chris Benoit
+Rick Rude
+Psicosis
+Juventud Guerrera
+OVW
+NXT
+WCW
+ECW
+TNA
+ROH
+Ring of Honor
+AEW
+WWF
+WWE
+Kayfabe
+Muay Thai

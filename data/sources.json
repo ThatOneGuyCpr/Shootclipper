@@ -1,0 +1,8 @@
+{
+  "None / unknown": {"bar": "none", "height": 0.0, "risk": "unknown"},
+  "Title Match / RF Video": {"bar": "bottom", "height": 0.17, "risk": "high"},
+  "Kayfabe Commentaries / YouShoot": {"bar": "bottom", "height": 0.10, "risk": "high"},
+  "Inside the Ropes": {"bar": "none", "height": 0.0, "risk": "low"},
+  "Podcast clip": {"bar": "none", "height": 0.0, "risk": "medium"},
+  "Original interview": {"bar": "none", "height": 0.0, "risk": "none"}
+}

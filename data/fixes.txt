@@ -1,0 +1,28 @@
+# Auto-corrections applied to every transcript.
+# Format:  what Whisper wrote => what it should say   (case-insensitive, whole words)
+# Add a line whenever you catch a repeat mistake in review.
+aid in English => Aiden English
+ate in English => Aiden English
+eight in English => Aiden English
+aidin => Aiden
+Simon got => Simon Gotch
+Simon gotch => Simon Gotch
+Time and gotch => Simon Gotch
+big cares => Big Cass
+Kalisco => Kalisto
+John Laurenidas => John Laurinaitis
+John Laurenitis => John Laurinaitis
+Laurenidas => Laurinaitis
+Laurenitis => Laurinaitis
+Jim Cornett => Jim Cornette
+Ray Mysterio => Rey Mysterio
+six one nine => 619
+GM Punk => CM Punk
+C.M. Punk => CM Punk
+Waldov on Eric => Waldo Von Erich
+Moitai => Muay Thai
+hot shot Johnny DeVine => Hotshot Johnny Devine
+coli brie => Colibri
+psychosis => Psicosis
+shnapple => Snapple
+ww owned ovw => WWE owned OVW

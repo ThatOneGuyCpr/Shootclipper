@@ -1,0 +1,9 @@
+# Channels to never pull from (official promotion channels are Content ID'd hard).
+WWE
+WWE Vault
+All Elite Wrestling
+AEW
+TNA Wrestling
+IMPACT Wrestling
+Ring of Honor Wrestling
+NJPW Global

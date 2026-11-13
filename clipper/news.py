@@ -1,0 +1,279 @@
+"""Find out what wrestling fans care about right now, then find interviews that speak to it.
+
+Stage 1 (scout): Claude + web search -> this week's topics, each with YouTube search queries.
+Stage 2 (discover): yt-dlp searches YouTube for those queries (no download) -> candidate list.
+Stage 3 (rank): Claude picks the candidates most likely to contain timely, clippable moments.
+"""
+import datetime as dt
+import json
+import re
+from pathlib import Path
+
+from . import config, db, llm
+
+WEB_SEARCH_TOOL = {"type": "web_search_20260318", "name": "web_search", "max_uses": 5,
+                   "response_inclusion": "excluded"}
+
+TOPICS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "as_of": {"type": "string"},
+        "topics": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "short label"},
+                    "why_now": {"type": "string", "description": "one sentence, with the date if relevant"},
+                    "people": {"type": "array", "items": {"type": "string"}},
+                    "urgency": {"type": "integer", "minimum": 1, "maximum": 5,
+                                "description": "5 = peaks in the next few days"},
+                    "peak_date": {"type": "string", "description": "YYYY-MM-DD the topic peaks, or ''"},
+                    "youtube_queries": {"type": "array", "items": {"type": "string"},
+                                        "description": "2-3 YouTube searches likely to surface interviews (not match footage) about this"},
+                },
+                "required": ["topic", "why_now", "people", "urgency", "peak_date", "youtube_queries"],
+            },
+        },
+    },
+    "required": ["as_of", "topics"],
+}
+
+PICKS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "picks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "topic": {"type": "string"},
+                    "why": {"type": "string"},
+                    "score": {"type": "integer", "minimum": 1, "maximum": 10},
+                },
+                "required": ["url", "topic", "why", "score"],
+            },
+        }
+    },
+    "required": ["picks"],
+}
+
+SCOUT_PROMPT = """Today is {today}. You're the research desk for a TikTok channel that posts clips from
+wrestling interviews: shoot interviews, podcasts and sit-downs (Chris Van Vliet, Inside the Ropes,
+Busted Open, Talk Is Jericho, Something to Wrestle, 83 Weeks, RF Video, Kayfabe Commentaries and similar).
+
+Search the web for what wrestling fans are talking about THIS WEEK and in the next two weeks:
+upcoming premium live events and their main matches, returns, debuts, retirements, deaths and
+anniversaries, injuries, contract news, feuds (on-screen and real), viral moments, big podcast
+quotes making headlines. Prefer reputable wrestling news outlets.
+
+Finish with a plain-text list of 6-10 topics, ranked by how much an interview clip about them
+would ride current attention. For each give: a short label, why it matters right now (with dates),
+the people involved, urgency 1-5 (5 = peaks in the next few days), the peak date if there is one,
+and 2-3 YouTube searches that would find INTERVIEWS where someone talks about the people involved
+(old interviews count if they're newly relevant). Avoid searches that would surface official
+match footage."""
+
+STRUCTURE_PROMPT = """Today is {today}. Convert these research notes into the topic list, keeping
+the order and every topic. Use '' for peak_date when none is given.
+
+NOTES:
+{notes}"""
+
+RANK_PROMPT = """Today is {today}. Pick the YouTube videos most worth clipping for a wrestling TikTok
+channel this week.
+
+What makes a strong pick: an interview or podcast (not match footage, not a news recap channel
+reading headlines) where someone with firsthand knowledge talks about a person or story that is
+currently in the news; candid storytelling; recognizable names; a length long enough to hold stories
+(10+ minutes ideal). Channels that tend to be stronger sources: {channels}.
+Prefer videos that have NOT already been clipped by the channel.
+
+CURRENT TOPICS:
+{topics}
+
+CANDIDATES:
+{candidates}
+
+Return up to 6 picks, best first. Use the exact URLs given."""
+
+
+def _client():
+    import anthropic
+    key = config.get_api_key()
+    if not key:
+        raise RuntimeError("No API key saved (Settings).")
+    return anthropic.Anthropic(api_key=key)
+
+
+def _cost(model, usage, searches=0):
+    pin, pout = config.MODEL_PRICES.get(model, (2.0, 10.0))
+    tin = (usage.input_tokens or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0) \
+        + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+    return tin / 1e6 * pin + (usage.output_tokens or 0) / 1e6 * pout + searches * 0.01
+
+
+def _dump(block):
+    return block.model_dump(exclude_none=True) if hasattr(block, "model_dump") else block
+
+
+def news_path(cfg):
+    return Path(cfg["workspace"]) / "news.json"
+
+
+def load_news(cfg):
+    p = news_path(cfg)
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+def news_is_fresh(cfg):
+    n = load_news(cfg)
+    if not n:
+        return False
+    age = dt.datetime.now() - dt.datetime.fromisoformat(n["fetched_at"])
+    return age.total_seconds() < float(cfg.get("news_refresh_days", 2)) * 86400
+
+
+def scout(cfg, log):
+    """Stage 1. Web-search the week in wrestling; returns and caches topics.
+
+    Research runs with web search and ends in plain-text notes; a second, small call
+    turns the notes into structured topics (structured outputs can't share a request
+    with web search citations).
+    """
+    model = cfg["model"]
+    client = _client()
+    today = dt.date.today().isoformat()
+    messages = [{"role": "user", "content": SCOUT_PROMPT.format(today=today)}]
+    total, notes = 0.0, ""
+    log("   scouting this week's wrestling news…")
+    for _ in range(6):
+        resp = client.messages.create(model=model, max_tokens=6000, tools=[WEB_SEARCH_TOOL],
+                                      messages=messages)
+        searches = getattr(getattr(resp.usage, "server_tool_use", None), "web_search_requests", 0) or 0
+        total += _cost(model, resp.usage, searches)
+        notes += "".join(getattr(b, "text", "") for b in resp.content
+                         if getattr(b, "type", "") == "text")
+        if resp.stop_reason != "pause_turn":
+            break
+        messages.append({"role": "assistant", "content": [_dump(b) for b in resp.content]})
+    if not notes.strip():
+        raise RuntimeError("News scout came back empty.")
+    result, responses = llm.structured(
+        client, model=model, schema=TOPICS_SCHEMA, max_tokens=4000,
+        messages=[{"role": "user", "content": STRUCTURE_PROMPT.format(today=today, notes=notes)}])
+    total += sum(_cost(model, r.usage) for r in responses)
+    if not result.get("topics"):
+        raise RuntimeError("News scout didn't return topics.")
+    result["fetched_at"] = dt.datetime.now().isoformat(timespec="seconds")
+    result["cost"] = round(total, 4)
+    news_path(cfg).write_text(json.dumps(result, indent=2), encoding="utf-8")
+    log(f"   {len(result['topics'])} topics found, about ${total:.3f}")
+    return result
+
+
+def topics_text(news, limit=10):
+    if not news:
+        return "(no current-events data)"
+    out = []
+    for t in sorted(news.get("topics", []), key=lambda t: -t.get("urgency", 0))[:limit]:
+        when = f" (peaks {t['peak_date']})" if t.get("peak_date") else ""
+        out.append(f"- [{t.get('urgency', 3)}/5] {t['topic']}{when}: {t['why_now']} "
+                   f"People: {', '.join(t.get('people', []))}")
+    return "\n".join(out)
+
+
+def _load_list(name):
+    p = config.APP_DIR / name
+    if not p.exists():
+        return []
+    return [l.strip() for l in p.read_text(encoding="utf-8").splitlines()
+            if l.strip() and not l.startswith("#")]
+
+
+def youtube_search(query, n=6):
+    import yt_dlp
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        res = ydl.extract_info(f"ytsearch{n}:{query}", download=False)
+    out = []
+    for e in res.get("entries") or []:
+        vid = e.get("id")
+        if not vid:
+            continue
+        out.append({
+            "url": f"https://www.youtube.com/watch?v={vid}",
+            "title": e.get("title") or "",
+            "channel": e.get("channel") or e.get("uploader") or "",
+            "duration": int(e.get("duration") or 0),
+            "views": int(e.get("view_count") or 0),
+        })
+    return out
+
+
+def discover(cfg, news, log):
+    """Stages 2 and 3. Returns ranked picks and saves them to picks.json."""
+    blocked = [b.lower() for b in _load_list("blocked_channels.txt")]
+    preferred = _load_list("channels.txt")
+    done = {i["url"] for i in db.list_interviews() if i.get("url")}
+    cands, seen = [], set()
+    topics = sorted(news.get("topics", []), key=lambda t: -t.get("urgency", 0))[:6]
+    log(f"   searching YouTube for {len(topics)} topics…")
+    for t in topics:
+        for q in t.get("youtube_queries", [])[:2]:
+            try:
+                for c in youtube_search(q):
+                    if c["url"] in seen or c["url"] in done:
+                        continue
+                    if c["channel"].lower() in blocked:
+                        continue
+                    if not (180 <= c["duration"] <= 3 * 3600):
+                        continue
+                    seen.add(c["url"])
+                    c["found_for"] = t["topic"]
+                    cands.append(c)
+            except Exception as e:
+                log(f"   search failed for '{q}': {str(e)[:80]}")
+    if not cands:
+        raise RuntimeError("YouTube search returned nothing usable.")
+    log(f"   ranking {len(cands)} candidates…")
+    lines = [f"- {c['url']} | {c['title']} | channel: {c['channel']} | "
+             f"{c['duration'] // 60} min | {c['views']:,} views | found for: {c['found_for']}"
+             for c in cands[:60]]
+    model = cfg["model"]
+    client = _client()
+    result, responses = llm.structured(
+        client, model=model, schema=PICKS_SCHEMA, max_tokens=2500,
+        messages=[{"role": "user", "content": RANK_PROMPT.format(
+            today=dt.date.today().isoformat(), channels=", ".join(preferred[:20]) or "n/a",
+            topics=topics_text(news), candidates="\n".join(lines))}])
+    picks = result.get("picks", [])
+    by_url = {c["url"]: c for c in cands}
+    picks = [dict(p, **{k: by_url[p["url"]][k] for k in ("title", "channel", "duration")})
+             for p in picks if p["url"] in by_url]
+    cost = sum(_cost(model, r.usage) for r in responses)
+    log(f"   {len(picks)} picks, about ${cost:.3f}")
+    (Path(cfg["workspace"]) / "picks.json").write_text(json.dumps(picks, indent=2), encoding="utf-8")
+    return picks
+
+
+def load_picks(cfg):
+    p = Path(cfg["workspace"]) / "picks.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+
+
+def scout_packet():
+    """Paste-mode version of the scout for the Claude Project (turn web search on there)."""
+    return (SCOUT_PROMPT.format(today=dt.date.today().isoformat())
+            + "\n\nInstead of a plain list, reply with ONE ```json block matching this schema and nothing else:\n"
+            + json.dumps(TOPICS_SCHEMA, indent=1))
+
+
+def save_pasted_topics(cfg, text):
+    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
+    raw = m.group(1) if m else text[text.find("{"):]
+    obj, _ = json.JSONDecoder().raw_decode(raw.strip())
+    obj["fetched_at"] = dt.datetime.now().isoformat(timespec="seconds")
+    news_path(cfg).write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    return obj

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en" data-theme="%%THEME%%">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shoot Clipper</title>
+<link rel="stylesheet" href="app.css">
+<script>window.__TOKEN__ = "%%TOKEN%%";</script>
+</head>
+<body>
+<div id="app">
+  <nav class="rail" aria-label="Sections">
+    <div class="mark" title="Shoot Clipper"><svg viewBox="0 0 24 24"><path d="M4 5h16v3H4zM4 10.5h10v3H4zM4 16h16v3H4z"/></svg></div>
+    <button class="rail-btn" data-view="home" title="Home"><span class="ico" data-ico="home"></span><span>Home</span></button>
+    <button class="rail-btn" data-view="review" title="Review"><span class="ico" data-ico="cut"></span><span>Review</span></button>
+    <button class="rail-btn" data-view="library" title="Library"><span class="ico" data-ico="grid"></span><span>Library</span></button>
+    <button class="rail-btn" data-view="settings" title="Settings"><span class="ico" data-ico="sliders"></span><span>Settings</span></button>
+    <div class="rail-gap"></div>
+    <button class="rail-btn" id="themeBtn" title="Switch light and dark"><span class="ico" data-ico="moon"></span><span>Theme</span></button>
+  </nav>
+
+  <div class="main">
+    <div class="views">
+
+      <!-- HOME -->
+      <section class="view" id="view-home">
+        <div class="home-grid">
+          <div class="col">
+            <div class="hero panel">
+              <button class="btn primary big" id="goBtn"><span class="ico" data-ico="play"></span>Make clips</button>
+              <div class="hero-side">
+                <ol class="stepper" id="stepper"></ol>
+                <p class="hint" id="heroHint"></p>
+              </div>
+            </div>
+            <div class="panel addrow">
+              <input id="urlInput" type="url" placeholder="Paste a YouTube link to an interview or podcast" aria-label="Interview link">
+              <select id="presetSel" aria-label="Source preset" title="Source preset: tells the renderer where a burned-in watermark sits"></select>
+              <button class="btn" id="addUrlBtn">Add link</button>
+              <button class="btn" id="addFilesBtn">Add files</button>
+            </div>
+            <div class="panel grow">
+              <header class="ph"><h2>Interviews</h2><span class="ph-note" id="ivCount"></span></header>
+              <div class="scroll" id="ivList"></div>
+            </div>
+          </div>
+          <div class="col">
+            <div class="panel grow">
+              <header class="ph"><h2>This week in wrestling</h2>
+                <div class="ph-actions"><button class="btn sm" id="scoutBtn">Refresh</button><button class="btn sm" id="discoverBtn">Find interviews</button></div>
+              </header>
+              <div class="scroll" id="newsList"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- REVIEW -->
+      <section class="view" id="view-review" hidden>
+        <div class="review-grid">
+          <aside class="panel clips-col">
+            <header class="ph"><h2>Clips</h2><div class="ph-actions"><button class="btn sm" id="renderApprovedBtn" title="Render every approved clip">Render approved</button></div></header>
+            <div class="scroll" id="clipList"></div>
+          </aside>
+
+          <div class="stage-col">
+            <div class="panel stage">
+              <header class="ph">
+                <h2 id="stageTitle">Pick a clip</h2>
+                <div class="seg" id="modeSeg" role="tablist">
+                  <button data-mode="source" class="on">Source</button><button data-mode="finished">Finished</button>
+                </div>
+              </header>
+              <div class="stage-body">
+                <div class="player" id="sourcePane">
+                  <video id="srcVideo" preload="metadata" playsinline></video>
+                  <div class="player-msg" id="playerMsg" hidden></div>
+                </div>
+                <div class="finished" id="finishedPane" hidden>
+                  <div class="phone"><video id="outVideo" controls playsinline loop></video></div>
+                  <div class="finished-side">
+                    <p id="finishedNote" class="hint"></p>
+                    <button class="btn" id="openOutBtn">Open file</button>
+                    <button class="btn" id="copyCapBtn2">Copy caption</button>
+                  </div>
+                </div>
+              </div>
+              <div class="transport">
+                <button class="btn icon" id="playBtn" title="Play or pause (Space)"><span class="ico" data-ico="play"></span></button>
+                <span class="tc" id="tcNow">0:00.0</span>
+                <span class="keys"><kbd>Space</kbd> play <kbd>I</kbd> in <kbd>O</kbd> out <kbd>J</kbd><kbd>L</kbd> step</span>
+                <span class="tc dim" id="tcLen"></span>
+              </div>
+              <div class="timeline" id="tlWrap">
+                <canvas id="tl"></canvas>
+                <div class="handle in" id="hIn" title="Drag to move the start"><i></i></div>
+                <div class="handle out" id="hOut" title="Drag to move the end"><i></i></div>
+              </div>
+            </div>
+            <div class="panel transcript-panel">
+              <header class="ph"><h2>Transcript</h2><span class="ph-note">Click a word to start there. Shift-click to end there.</span></header>
+              <div class="scroll transcript" id="transcript"></div>
+            </div>
+          </div>
+
+          <aside class="panel inspector">
+            <header class="ph"><h2>Clip</h2><span class="ph-note" id="saveNote"></span></header>
+            <div class="scroll insp-body" id="inspBody" hidden>
+              <div class="insp-head">
+                <div class="stars" id="iStars"></div>
+                <p id="iWhy"></p>
+                <p class="flag" id="iFlags" hidden></p>
+              </div>
+              <div class="row2">
+                <label>Start<div class="nudge"><button data-n="start,-0.5">−</button><input id="iStart" inputmode="decimal"><button data-n="start,0.5">+</button></div></label>
+                <label>End<div class="nudge"><button data-n="end,-0.5">−</button><input id="iEnd" inputmode="decimal"><button data-n="end,0.5">+</button></div></label>
+              </div>
+              <div class="row-actions"><button class="btn sm" id="snapBtn" title="Line the start and end up with whole words and sentences">Snap to words</button><button class="btn sm" id="playSelBtn">Play selection</button></div>
+              <label>Layout
+                <div class="seg wide" id="framingSeg"><button data-f="split">2K on top</button><button data-f="face">Face only</button><button data-f="wide">Wide</button></div>
+              </label>
+              <div class="gp" id="gpRow">
+                <span class="gp-name" id="gpName"></span>
+                <button class="btn sm" id="gpAuto">Auto-match</button><button class="btn sm" id="gpChoose">Choose</button>
+              </div>
+              <label>Name plate<input id="iSpeaker" placeholder="Speaker's name"></label>
+              <label>Caption<textarea id="iCaption" rows="3"></textarea></label>
+              <label>Hashtags<textarea id="iTags" rows="2"></textarea></label>
+              <details class="more"><summary>Hook and context card</summary>
+                <label>Hook text<input id="iHook"></label>
+                <label>Context card<textarea id="iCard" rows="2"></textarea></label>
+                <p class="hint">These only appear in the video if they're switched on in Settings.</p>
+              </details>
+            </div>
+            <footer class="insp-foot" id="inspFoot" hidden>
+              <button class="btn primary" id="renderBtn">Render clip</button>
+              <button class="btn" id="approveBtn">Approve</button>
+              <button class="btn danger" id="rejectBtn">Reject</button>
+            </footer>
+            <div class="empty" id="inspEmpty">Clips Claude suggests show up on the left. Pick one to trim and render it.</div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- LIBRARY -->
+      <section class="view" id="view-library" hidden>
+        <div class="lib-top">
+          <div class="seg" id="libSeg"><button data-w="to_post" class="on">To post</button><button data-w="scheduled">Scheduled</button><button data-w="posted">Posted</button><button data-w="all">All</button></div>
+          <div class="lib-stats" id="libStats"></div>
+          <button class="btn" id="openReadyBtn">Open folder</button>
+        </div>
+        <div class="lib-scroll"><div class="lib-grid" id="libGrid"></div></div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view" id="view-settings" hidden>
+        <div class="settings-scroll"><div class="settings" id="settingsBody"></div></div>
+      </section>
+    </div>
+
+    <div class="drawer" id="drawer" hidden><pre id="logBox"></pre></div>
+    <footer class="statusbar">
+      <span class="dot" id="sbDot"></span>
+      <span id="sbLabel">Idle</span>
+      <span class="sb-steps" id="sbSteps"></span>
+      <span class="sb-last" id="sbLast"></span>
+      <button class="sb-btn sb-update" id="updBtn" hidden></button>
+      <button class="sb-btn" id="logBtn" aria-expanded="false">Log</button>
+    </footer>
+  </div>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card">
+    <h3 id="modalTitle"></h3>
+    <p class="hint" id="modalHint"></p>
+    <textarea id="modalText" rows="12"></textarea>
+    <div class="modal-actions"><button class="btn" id="modalCancel">Cancel</button><button class="btn primary" id="modalOk">OK</button></div>
+  </div>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
