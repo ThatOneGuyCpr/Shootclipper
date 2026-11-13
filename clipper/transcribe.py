@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-from . import config, util
+from . import applog, config, util
 
 _TOKEN = re.compile(r"[^\w']+")
 
@@ -80,23 +80,88 @@ def apply_fixes(words, fixes):
     return out
 
 
+# Approximate download sizes, for progress in the log.
+MODEL_MB = {"tiny": 75, "base": 145, "small": 485, "medium": 1530, "large-v3-turbo": 1620}
+MODEL_FILES = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
+
+
+def _model_ok(d):
+    mb = d / "model.bin"
+    return mb.is_file() and mb.stat().st_size > 10_000_000 and (d / "config.json").is_file()
+
+
+def _folder_mb(d):
+    return sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) / 1e6
+
+
+def ensure_model(name, log, progress=None):
+    """Download a Whisper model into %APPDATA%\\ShootClipper\\models\\<name> as plain files and
+    return that folder. Avoids the shared Hugging Face cache, whose half-finished downloads
+    faster-whisper would otherwise pick up silently (missing model.bin)."""
+    import os
+    import shutil
+    import threading
+    from faster_whisper.utils import _MODELS
+    from huggingface_hub import snapshot_download
+
+    if name not in _MODELS:
+        raise ValueError(f"Unknown Whisper model '{name}'")
+    dest = config.APP_DIR / "models" / name
+    if _model_ok(dest):
+        return dest
+    total = MODEL_MB.get(name, 500)
+    log(f"   downloading the Whisper {name} model (about {total} MB, one time only)…")
+
+    last_err = None
+    for attempt in range(2):
+        if attempt == 1:
+            # Second try over plain HTTPS instead of Hugging Face's Xet transfer, which
+            # some networks and antivirus tools interfere with.
+            os.environ["HF_HUB_DISABLE_XET"] = "1"
+            shutil.rmtree(dest, ignore_errors=True)
+            log("   retrying the model download another way…")
+        dest.mkdir(parents=True, exist_ok=True)
+        done = threading.Event()
+
+        def watch():
+            while not done.wait(3):
+                mb = _folder_mb(dest)
+                if progress:
+                    progress(min(mb / total, 0.99))
+        threading.Thread(target=watch, daemon=True).start()
+        try:
+            snapshot_download(_MODELS[name], local_dir=str(dest), allow_patterns=MODEL_FILES)
+        except Exception as e:
+            last_err = e
+            applog.write(f"Whisper model download failed (attempt {attempt + 1}): {e!r}")
+        finally:
+            done.set()
+        if _model_ok(dest):
+            log("   model downloaded")
+            return dest
+    raise RuntimeError(f"Couldn't download the Whisper {name} model ({last_err or 'model.bin missing'}). "
+                       "Check your internet connection and try again; if it keeps failing, "
+                       "an antivirus or firewall may be blocking huggingface.co.")
+
+
 def transcribe(media_path, title, out_dir, cfg, log, progress=None):
     from faster_whisper import WhisperModel
 
     out_dir = Path(out_dir)
     device = detect_device(cfg.get("device", "auto"))
     model_name = pick_model(cfg.get("whisper_model", "auto"), device)
-    log(f"   Whisper model: {model_name} on {device.upper()} (first run downloads the model)")
+    log(f"   Whisper model: {model_name} on {device.upper()}")
 
     try:
-        model = WhisperModel(model_name, device=device,
+        model = WhisperModel(str(ensure_model(model_name, log, progress)), device=device,
                              compute_type="float16" if device == "cuda" else "int8")
     except Exception as e:
         if device == "cuda":
             log(f"   GPU load failed ({str(e)[:120]}), falling back to CPU")
             device = "cpu"
             model_name = pick_model(cfg.get("whisper_model", "auto"), device)
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+            model = WhisperModel(str(ensure_model(model_name, log, progress)), device="cpu",
+                                 compute_type="int8")
         else:
             raise
 

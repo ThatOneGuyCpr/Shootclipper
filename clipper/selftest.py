@@ -59,8 +59,10 @@ def _checks():
         # which exercises ctranslate2, onnxruntime (VAD) and the bundled assets.
         import numpy as np
         from faster_whisper import WhisperModel
+        from . import transcribe
         audio = (0.1 * np.sin(2 * np.pi * 220 * np.arange(16000) / 16000)).astype(np.float32)
-        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        model = WhisperModel(str(transcribe.ensure_model("tiny", lambda m: None)), device="cpu",
+                             compute_type="int8")
         segs, _ = model.transcribe(audio, vad_filter=True)
         list(segs)
         import ctranslate2
