@@ -1,5 +1,2 @@
-- **Stop**: while anything runs, Make clips turns into Stop (there's one in the bottom bar too). Finished steps are kept, and Make clips picks up from there.
-- **Found interviews**: Make clips now shows the interviews it found, with thumbnails, and you pick which one becomes clips. Queue saves one for later; Not this hides it for good; Find more searches again. To go back to automatic picking: Settings > Make clips > Choosing interviews.
-- **Stories first**: finding interviews and picking clips now favor anecdotes with a setup and payoff, from any era. Timeliness is a boost, not the main rule.
-- **Failed interviews get retried**: Make clips tries an interview that stopped with an error again (twice) instead of skipping it, and each interview has Try again / Make clips on its card.
-- **Storage cleanup**: Settings > Storage shows space used, deletes interview videos a week after their clips are made and finished clips a month after rendering (both adjustable, or Never), and has Clean up now. Delete on an interview removes its files too.
+- Fixes "Streaming is required for operations that may take longer than 10 minutes" when picking clips from long interviews. Every Claude request now streams, so long interviews have room for a full answer (and Stop works mid-answer).
+- Clip picking returns at most the 12 best stories per interview, which keeps long interviews fast and cheaper.

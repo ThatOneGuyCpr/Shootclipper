@@ -8,6 +8,8 @@ guarantees the reply text parses against the schema.
 import copy
 import json
 
+from . import jobs
+
 
 def api_schema(schema):
     """Adapt a schema to what structured outputs accepts (additionalProperties: false
@@ -45,16 +47,22 @@ def structured(client, *, model, schema, messages, system=None, max_tokens=4000)
 
     Returns (obj, [responses]) so callers can total the cost of every attempt.
     Retries once with more room if the reply was cut off.
+
+    Always streams: the SDK refuses large non-streamed requests ("Streaming is required
+    for operations that may take longer than 10 minutes"), and long interviews need room.
     """
     kw = {"system": system} if system else {}
     fmt = {"format": {"type": "json_schema", "schema": api_schema(schema)}}
     responses = []
     for attempt in range(2):
-        resp = client.messages.create(model=model, max_tokens=max_tokens, messages=messages,
-                                      output_config=fmt, **kw)
+        with client.messages.stream(model=model, max_tokens=max_tokens, messages=messages,
+                                    output_config=fmt, **kw) as stream:
+            for _ in stream:
+                jobs.check()  # Stop works mid-reply too
+            resp = stream.get_final_message()
         responses.append(resp)
         if resp.stop_reason == "max_tokens" and attempt == 0:
-            max_tokens *= 2
+            max_tokens = min(max_tokens * 2, 64000)
             continue
         break
     if resp.stop_reason == "refusal":

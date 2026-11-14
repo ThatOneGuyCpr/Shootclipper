@@ -35,7 +35,8 @@ Rules:
 - Use the transcript timestamps. start = the first word of the clip, end = the last word. Do not start mid-sentence or cut before a punchline lands.
 - Length: most clips should run 60-120 seconds; the channel's best performers tell a whole story. Go up to
   150 seconds if the story holds, and only go under 60 for a single devastating line. Quality over quantity:
-  return only clips you'd rate 3+ (roughly 3-8 per hour of footage, fewer if the material is thin).
+  return only clips you'd rate 3+ (roughly 3-8 per hour of footage, fewer if the material is thin),
+  and never more than 12 in total: if there are more, keep the 12 best stories.
 - hook: on-screen text at the top of the video for the whole clip. Max 8 words, plain and specific, no emoji, no clickbait words like "SHOCKING". Example: "Cornette on the man who ran OVW into the ground".
 - context_card: a 2-3 second text card shown before the clip that gives a non-fan the setup. Max 20 words. Example: "2005. Jim Cornette runs WWE's training ground. John Laurinaitis just took over talent relations."
 - caption: the TikTok description. Under 150 characters, conversational, can end with a question to drive comments. Never name the production company or distributor (RF Video, Title Match, Kayfabe Commentaries, Inside the Ropes, YouShoot) in hooks, cards or captions.
@@ -149,7 +150,7 @@ def run_api(interview, data, energy, contact_path, model, log, news_text=""):
     content.append({"type": "text", "text": build_context(interview, data, energy, news_text)})
     log(f"   asking {model} for clip picks…")
     result, responses = llm.structured(
-        client, model=model, schema=CLIP_SCHEMA, max_tokens=12000,
+        client, model=model, schema=CLIP_SCHEMA, max_tokens=32000,
         system=[{"type": "text", "text": EDITORIAL, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": content}],
     )
