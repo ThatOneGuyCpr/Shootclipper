@@ -31,14 +31,21 @@ def main():
         print(line)
         applog.write(f"[autopilot] {msg}")
 
+    lock = util.RunLock(config.APP_DIR / "run.lock")
+    if not lock.acquire():
+        log("Skipped: Shoot Clipper is already making clips.")
+        return
     log("Autopilot run started")
     runs = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 1
     outs = []
-    for _ in range(runs):
-        try:
-            outs += pipeline.go(cfg, log)
-        except Exception as e:
-            log(f"Run failed: {e}")
+    try:
+        for _ in range(runs):
+            try:
+                outs += pipeline.go(cfg, log)
+            except Exception as e:
+                log(f"Run failed: {e}")
+    finally:
+        lock.release()
     if outs and cfg.get("open_folder_when_done"):
         try:
             util.open_path(pipeline.ready_dir(cfg))

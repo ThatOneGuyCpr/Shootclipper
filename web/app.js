@@ -112,8 +112,8 @@ function applyTheme(t) {
 
 // ── status bar, stepper, log ───────────────────────────────────────────────
 function renderSteps() {
-  const names = ["download", "transcribe", "analyze", "render"];
-  const labels = { download: "Download", transcribe: "Transcribe", analyze: "Analyze", render: "Render" };
+  const names = ["screen", "download", "transcribe", "analyze", "render"];
+  const labels = { screen: "Find stories", download: "Download", transcribe: "Transcribe", analyze: "Pick clips", render: "Render" };
   const by = Object.fromEntries(S.steps.map(s => [s.key, s]));
   $("#stepper").innerHTML = names.map(k => {
     const s = by[k];
@@ -208,10 +208,15 @@ async function loadHome() {
   }).join("") : `<div class="empty">Nothing here yet. Pick one under Found interviews, or paste a link above.</div>`;
 
   $("#foundList").innerHTML = st.picks.length ? st.picks.map(p => {
+    const sc = p.screen;
+    const count = sc ? `${sc.story_count} ${sc.story_count === 1 ? "story" : "stories"}, about ${Math.max(1, Math.round(sc.story_minutes))} min` : "";
     const meta = [p.channel, views(p.views), p.topic ? `For: ${p.topic}` : ""].filter(Boolean).join(", ");
+    const stories = sc && sc.top && sc.top.length
+      ? `<p class="found-stories" title="${esc(sc.stories.filter(s => s.strength >= 3).map(s => s.title).join("\n"))}"><b>${esc(count)}:</b> ${esc(sc.top.join("; "))}</p>`
+      : `<p class="found-why">${esc(p.why)}${sc === null ? " (Captions couldn't be read, so its stories aren't counted.)" : ""}</p>`;
     return `<div class="found">
       <button class="found-thumb" data-watch="${esc(p.url)}" title="Watch on YouTube">${p.thumb ? `<img src="${esc(p.thumb)}" alt="" loading="lazy" onerror="this.remove()">` : ""}<span class="len">${fmt(p.duration || 0)}</span></button>
-      <div class="found-body"><div class="found-title" title="${esc(p.title)}">${esc(p.title)}</div><div class="found-meta">${esc(meta)}</div><p class="found-why">${esc(p.why)}</p></div>
+      <div class="found-body"><div class="found-title" title="${esc(p.title)}">${esc(p.title)}</div><div class="found-meta">${esc(meta)}</div>${stories}</div>
       <div class="found-actions"><button class="btn sm primary" data-make="${esc(p.url)}">Make clips</button><div class="row"><button class="btn sm" data-pick="${esc(p.url)}" title="Add to Your interviews for later">Queue</button><button class="btn sm" data-dismiss="${esc(p.url)}" title="Don't suggest this again">Not this</button></div></div>
     </div>`;
   }).join("") : `<div class="empty">${cfg.analysis_mode === "api" ? "Press Make clips or Find more and Shoot Clipper searches YouTube for interviews full of stories, tied to this week's news. You pick which one becomes clips." : "Finding interviews needs API mode (Settings). In Paste mode, paste a link above."}</div>`;
@@ -336,6 +341,9 @@ async function selectClip(cid) {
   setFraming(c.framing || "face", false);
   $("#saveNote").textContent = "";
   $("#transcript").innerHTML = d.words.map((w, i) => `<span data-i="${i}">${esc(w.w)}</span> `).join("") || `<span class="hint">No transcript for this stretch.</span>`;
+  const partial = d.gaps && d.gaps.length > 0;
+  $("#moreTranscript").hidden = !partial;
+  $("#transcriptNote").textContent = partial ? "Only the story sections are transcribed." : "Click a word to start there. Shift-click to end there.";
   $("#transcript").scrollTop = 0;
   loadSource();
   renderFinished();
@@ -559,6 +567,7 @@ function wireReview() {
   };
   $("#playSelBtn").onclick = () => { setMode("source"); $("#srcVideo").pause(); togglePlay(true); };
   $("#playBtn").onclick = () => togglePlay();
+  $("#moreTranscript").onclick = () => R.id && attempt(() => call("extend_transcript", R.id));
   $("#transcript").onclick = e => {
     const el = e.target.closest("span[data-i]"); if (!el || !R.d) return;
     const w = R.d.words[+el.dataset.i];
@@ -657,6 +666,8 @@ const SETTINGS = [
     { key: "gameplay_dir", label: "2K captures folder", type: "folder", hint: "Name captures after the matchup, like “Ventura vs Hogan.mp4”, or keep a folder per wrestler." },
     { key: "gameplay_speed", label: "2K speed", type: "number", unit: "x", step: "0.05", hint: "Every capture plays at this speed. The match is timed so the finish lands as the clip ends." },
     { key: "framing_mode", label: "Layout for Make clips", type: "select", options: [["split when matched", "2K on top when a capture matches"], ["alternate", "Alternate, to compare views"], ["face only", "Face only"]] },
+    { key: "find_match_end", label: "Find the finish", type: "bool", hint: "Claude looks at the end of each capture once and finds the winner screen, so captures don't need trimming." },
+    { key: "speaker_tracking", label: "Follow the speaker", type: "bool", hint: "On shots with two or more people, the interview crop cuts to whoever is talking." },
     { key: "interview_zoom", label: "Interview zoom", type: "number", step: "0.05", unit: "x", hint: "How tight the interview panel is under the 2K. 1.35 matches your edits." },
   ]],
   ["Captions and look", [
@@ -671,6 +682,7 @@ const SETTINGS = [
     { key: "handle", label: "Channel handle", type: "text", hint: "Printed in the bar that covers source watermarks in face-only clips." },
   ]],
   ["Transcription", [
+    { key: "transcribe_mode", label: "Transcribe", type: "select", options: [["stories", "Only the story sections (much faster)"], ["full", "The whole interview"]], hint: "Story sections come from a quick read of YouTube's captions before the download. Files you add yourself, and videos without captions, are always transcribed in full." },
     { key: "whisper_model", label: "Whisper model", type: "select", options: [["auto", "Automatic"], ["small", "small"], ["medium", "medium"], ["large-v3-turbo", "large-v3-turbo"], ["base", "base"]], hint: "Automatic uses large-v3-turbo with an NVIDIA GPU, and small on CPU." },
     { key: "device", label: "Run on", type: "select", options: [["auto", "Automatic"], ["cuda", "NVIDIA GPU"], ["cpu", "CPU"]] },
     { custom: "wordlists" },

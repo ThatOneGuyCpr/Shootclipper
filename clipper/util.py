@@ -65,6 +65,65 @@ def probe(path):
     }
 
 
+def write_json(path, obj, indent=None):
+    """Write JSON so a crash or power cut mid-write can't leave a half-written file."""
+    path = str(path)
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=indent)
+    os.replace(tmp, path)
+
+
+def read_json(path, default=None):
+    """Read JSON, returning `default` if the file is missing or damaged."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+class RunLock:
+    """One Make clips run at a time across the app and the daily run (two processes
+    working the same interview would trip over each other). Held as an OS file lock,
+    so it frees itself if the process dies."""
+
+    def __init__(self, path):
+        self.path, self.f = str(path), None
+
+    def acquire(self):
+        f = open(self.path, "a+")
+        try:
+            if IS_WINDOWS:
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return False
+        self.f = f
+        return True
+
+    def release(self):
+        if not self.f:
+            return
+        try:
+            if IS_WINDOWS:
+                import msvcrt
+                self.f.seek(0)
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        self.f.close()
+        self.f = None
+
+
 def ts(seconds, decimals=0):
     """Seconds -> M:SS (or H:MM:SS). decimals=1 adds tenths."""
     seconds = max(0.0, float(seconds))

@@ -1,5 +1,5 @@
 """Ask Claude for clip picks. Two routes, same output:
-  - API: automatic, structured via a forced tool call.
+  - API: automatic, as a structured (schema-checked) reply.
   - Paste: builds one text packet for the Claude Project; you paste the JSON reply back.
 """
 import base64
@@ -7,7 +7,7 @@ import json
 import re
 from pathlib import Path
 
-from . import config, db, llm, signals, transcribe, util
+from . import db, llm, signals, transcribe, util
 
 EDITORIAL = """You pick TikTok clips from pro wrestling interviews (shoot interviews, podcasts, sit-downs like
 Chris Van Vliet or Inside the Ropes) for a wrestling TikTok channel.
@@ -41,7 +41,7 @@ Rules:
 - context_card: a 2-3 second text card shown before the clip that gives a non-fan the setup. Max 20 words. Example: "2005. Jim Cornette runs WWE's training ground. John Laurinaitis just took over talent relations."
 - caption: the TikTok description. Under 150 characters, conversational, can end with a question to drive comments. Never name the production company or distributor (RF Video, Title Match, Kayfabe Commentaries, Inside the Ropes, YouShoot) in hooks, cards or captions.
 - hashtags: 8-12, mixing wrestler names, era/promotion tags and niche tags. Always include #wrestling #wrestlingtiktok #shootinterview.
-- framing: "face" for a single speaker on screen; "wide" if the clip is mostly a two-shot or panel where cropping to one face would lose the other person.
+- framing: "face" for almost everything, including two-person shots: the app crops to whoever is talking and follows the conversation. Use "wide" only when the picture needs everyone at once (a panel of three or more, or something being shown or acted out on screen).
 - flags: note anything needing care: deceased subjects (treat with affection, never mockery), Chris Benoit, graphic violence described about a living person, accusations of crimes, slurs, Teddy Hart's legal history. Empty list if none.
 - gameplay_wrestlers: the channel stages a WWE 2K match above each clip between the people in the story.
   Name the two who should fight, usually the speaker and the person they're talking about
@@ -99,15 +99,38 @@ CLIP_SCHEMA = {
 
 
 def transcript_lines(data):
-    """Compact transcript with one-decimal timestamps in seconds (easy for the model to copy)."""
-    out = []
+    """Compact transcript with one-decimal timestamps in seconds (easy for the model to copy).
+    A partial transcript gets a marker wherever a stretch was skipped."""
+    out, prev_end = [], 0.0
+    partial = bool(data.get("partial"))
     for s in data["segments"]:
+        if partial and s["start"] - prev_end > 45:
+            out.append(f"--- {util.ts(prev_end)} to {util.ts(s['start'])} not transcribed ---")
         out.append(f"[{s['start']:.1f}] {s['text']}")
+        prev_end = s["end"]
     return "\n".join(out)
 
 
-def build_context(interview, data, energy, news_text=""):
+def story_notes(notes):
+    """The first pass's story list, as hints for the clip picker."""
+    stories = (notes or {}).get("stories") or []
+    return "\n".join(f"- [{s['start']:.0f}-{s['end']:.0f}] {s['title']} (strength {s['strength']})"
+                     for s in stories if s.get("strength", 0) >= 3)
+
+
+def build_context(interview, data, energy, news_text="", notes=None):
     lib = db.library_digest()
+    first_pass = story_notes(notes) if data.get("partial") else ""
+    coverage = []
+    if data.get("partial"):
+        coverage = [
+            "",
+            "ONLY PARTS OF THIS INTERVIEW ARE TRANSCRIBED: a first pass over rough captions marked "
+            "where the stories are, and just those sections were transcribed accurately. Pick clips "
+            "only from transcribed text, and keep start and end at least 2 seconds inside a section.",
+            "First-pass story notes ([seconds] from rough captions; check them against the transcript):",
+            first_pass or "- (none)",
+        ]
     parts = [
         f"INTERVIEW: {interview['title']}",
         f"Why this video was picked: {interview.get('pick_reason') or 'added manually'}",
@@ -119,6 +142,7 @@ def build_context(interview, data, energy, news_text=""):
         f"Duration: {util.ts(data['duration'])} ({data['duration']:.0f}s)",
         "",
         "AUDIO ENERGY: " + signals.energy_summary(energy),
+        *coverage,
         "",
         "CLIPS ALREADY IN THE LIBRARY (for series connections; don't duplicate):",
         "\n".join(f"- {x}" for x in lib) if lib else "- (none yet)",
@@ -137,29 +161,23 @@ def _image_block(path):
     return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}}
 
 
-def run_api(interview, data, energy, contact_path, model, log, news_text=""):
-    import anthropic
-
-    key = config.get_api_key()
-    if not key:
-        raise RuntimeError("No API key saved. Add one in Settings, or switch to Paste mode.")
-    client = anthropic.Anthropic(api_key=key)
+def run_api(interview, data, energy, contact_path, model, log, news_text="", notes=None):
+    client = llm.client()
     content = []
     if contact_path and Path(contact_path).exists():
         content.append(_image_block(contact_path))
-    content.append({"type": "text", "text": build_context(interview, data, energy, news_text)})
+    content.append({"type": "text", "text": build_context(interview, data, energy, news_text, notes)})
     log(f"   asking {model} for clip picks…")
     result, responses = llm.structured(
         client, model=model, schema=CLIP_SCHEMA, max_tokens=32000,
         system=[{"type": "text", "text": EDITORIAL, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": content}],
     )
-    pin, pout = config.MODEL_PRICES.get(model, (2.0, 10.0))
     in_tok = out_tok = 0
     for r in responses:
         i, o = llm.usage_tokens(r.usage)
         in_tok, out_tok = in_tok + i, out_tok + o
-    cost = in_tok / 1e6 * pin + out_tok / 1e6 * pout
+    cost = llm.cost(model, responses)
     log(f"   {in_tok:,} tokens in, {out_tok:,} out, about ${cost:.3f}")
     return result, cost
 
@@ -188,12 +206,23 @@ def parse_reply(text):
 def ingest_result(interview, data, result):
     """Snap times to word boundaries, store clips, save analysis.json."""
     wd = Path(interview["workdir"])
-    (wd / "analysis.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    util.write_json(wd / "analysis.json", result, indent=2)
+    duration = float(data.get("duration") or 0)
     clips = []
     for c in result.get("clips", []):
         try:
-            s, e = transcribe.snap(data, float(c["start"]), float(c["end"]))
+            want_s, want_e = float(c["start"]), float(c["end"])
+            s, e = transcribe.snap(data, want_s, want_e)
         except Exception:
+            continue
+        if duration:
+            e = min(e, duration)
+        # Drop picks that don't hold up: times that make no sense, a start that had to jump
+        # a long way to find any words (it pointed into an untranscribed stretch), or a clip
+        # with next to nothing said in it.
+        if e - s < 5 or e - s > 240 or abs(s - want_s) > 20:
+            continue
+        if len(transcribe.text_between(data, s, e).split()) < 8:
             continue
         c["start"], c["end"] = s, e
         if c.get("timely"):

@@ -7,13 +7,13 @@ Interview status flow:
 Stop (jobs.Cancelled) unwinds without marking anything as failed: finished steps
 stay finished, so pressing Make clips again picks up where it stopped.
 """
-
-MAX_AUTO_RETRIES = 2  # Make clips retries a failed interview this many times, then skips it
-import json
 import traceback
 from pathlib import Path
 
-from . import analyze, cleanup, config, db, gameplay, ingest, jobs, news, render, signals, transcribe, util
+from . import (analyze, cleanup, config, db, gameplay, ingest, jobs, news, render, screen,
+               signals, transcribe, util)
+
+MAX_AUTO_RETRIES = 2  # Make clips retries a failed interview this many times, then skips it
 
 STEP_ORDER = ["queued", "downloaded", "transcribed", "prepped", "analyzed", "done"]
 
@@ -39,17 +39,74 @@ def _no_step(name, state):
     pass
 
 
+def wants_screening(cfg, iv):
+    """Screening reads YouTube captions with Claude, so it needs a link and API mode."""
+    return bool(iv.get("url")) and cfg.get("analysis_mode") == "api" \
+        and cfg.get("transcribe_mode", "stories") == "stories"
+
+
+def story_sections(cfg, iv, wd, log, step=_no_step):
+    """Find this interview's story sections from its captions (once; saved as screen.json).
+    Returns [[start, end], ...] for Whisper, or [] to transcribe everything."""
+    if not wants_screening(cfg, iv):
+        step("screen", "skip")
+        return []
+    result = screen.load(wd)
+    if result is None:
+        step("screen", "active")
+        log("🔎 Reading the captions to find the stories…")
+        try:
+            result = screen.screen_url(cfg, iv["url"])
+        except jobs.Cancelled:
+            raise
+        except Exception as e:
+            result = {"available": False, "reason": str(e)[:160]}
+        screen.save(wd, result)
+        if result.get("available"):
+            db.update_interview(iv["id"], cost=(iv.get("cost") or 0) + (result.get("cost") or 0))
+        if result.get("title") and iv["title"] == iv.get("url"):
+            db.update_interview(iv["id"], title=result["title"], duration=result.get("duration") or 0)
+        step("screen", "done")
+    else:
+        step("screen", "skip")
+    if not result.get("available"):
+        log(f"   {result.get('reason') or 'captions unavailable'}; transcribing the whole interview")
+        return []
+    secs = screen.sections(result.get("stories") or [], result.get("duration") or 0)
+    if not secs:
+        log("   no clear stories in the captions; transcribing the whole interview to be sure")
+        return []
+    log(f"   {result.get('story_count', 0)} stories found, about {result.get('story_minutes', 0):g} min "
+        f"of a {util.ts(result.get('duration') or 0)} interview")
+    return secs
+
+
 def process_interview(cfg, iid, log, progress=lambda p: None, step=_no_step):
     """Bring one interview as far as analysis. Safe to call repeatedly; skips finished steps.
-    step(name, state) reports progress to the UI: download / transcribe / analyze."""
+    step(name, state) reports progress to the UI: screen / download / transcribe / analyze."""
     iv = db.get_interview(iid)
     wd = Path(iv["workdir"])
-    cur = "download"
-    if iv["source_path"] and not Path(iv["source_path"]).exists() and iv.get("url"):
+    cur = "screen"
+    if iv["source_path"] and not Path(iv["source_path"]).exists():
+        if not iv.get("url"):
+            db.update_interview(iid, status="error", attempts=MAX_AUTO_RETRIES,
+                                error="The video file was moved or deleted.")
+            step("download", "error")
+            raise RuntimeError(f"The video file for “{iv['title']}” was moved or deleted: "
+                               f"{iv['source_path']}")
         db.update_interview(iid, source_path="")  # cleaned up earlier: download again
         iv = db.get_interview(iid)
     try:
+        # 0. first pass over the captions (only needed until there's a transcript)
+        data = transcribe.load(wd)
+        sections = story_sections(cfg, iv, wd, log, step) if data is None else []
+        if data is not None:
+            step("screen", "skip")
+        iv = db.get_interview(iid)
+
         # 1. download
+        jobs.check()
+        cur = "download"
         if iv["source_path"]:
             step("download", "skip")
         else:
@@ -60,17 +117,19 @@ def process_interview(cfg, iid, log, progress=lambda p: None, step=_no_step):
             db.update_interview(iid, source_path=str(path), title=title,
                                 duration=info["duration"], status="downloaded")
             iv = db.get_interview(iid)
-            log(f"   got “{title}” ({util.ts(info['duration'])})")
+            log(f"   got “{title}” ({util.ts(info['duration'])}, {info['width']}x{info['height']})")
+            if info["has_video"] and info["height"] < 700:
+                log("   ⚠ YouTube only offered a low-resolution copy, so clips from this one will look soft.")
             step("download", "done")
 
         # 2. transcribe
         jobs.check()
         cur = "transcribe"
-        data = transcribe.load(wd)
         step("transcribe", "active" if data is None or not (wd / "energy.json").exists() else "skip")
         if data is None:
             log(f"✎ Transcribing “{iv['title']}”")
-            data = transcribe.transcribe(iv["source_path"], iv["title"], wd, cfg, log, progress)
+            data = transcribe.transcribe(iv["source_path"], iv["title"], wd, cfg, log, progress,
+                                         ranges=sections)
             db.update_interview(iid, status="transcribed")
         progress(1.0)
 
@@ -97,11 +156,22 @@ def process_interview(cfg, iid, log, progress=lambda p: None, step=_no_step):
             db.update_interview(iid, status="needs_paste")
             log("   ready for Claude: use “Copy packet”, paste into your Project, then “Paste reply”.")
             return db.get_interview(iid)
-        energy = json.loads((wd / "energy.json").read_text())
+        energy = util.read_json(wd / "energy.json", {})
         contact = wd / "contact_sheet.jpg"
         result, cost = analyze.run_api(iv, data, energy, contact if contact.exists() else None,
-                                       cfg["model"], log, current_news_text(cfg))
+                                       cfg["model"], log, current_news_text(cfg),
+                                       notes=screen.load(wd))
         n = analyze.ingest_result(iv, data, result)
+        if n == 0 and data.get("partial"):
+            # The first pass pointed at the wrong places. Fall back to the full transcript once.
+            log("   no usable clips in the story sections; transcribing the whole interview instead")
+            step("transcribe", "active")
+            data = transcribe.transcribe(iv["source_path"], iv["title"], wd, cfg, log, progress)
+            step("transcribe", "done")
+            result, more = analyze.run_api(iv, data, energy, contact if contact.exists() else None,
+                                           cfg["model"], log, current_news_text(cfg))
+            cost += more
+            n = analyze.ingest_result(iv, data, result)
         db.update_interview(iid, status="analyzed", cost=(iv.get("cost") or 0) + cost, error="",
                             attempts=0)
         log(f"✓ {n} clip ideas from “{iv['title']}”")
@@ -123,7 +193,7 @@ def packet_for(cfg, iid):
     iv = db.get_interview(iid)
     wd = Path(iv["workdir"])
     data = transcribe.load(wd)
-    energy = json.loads((wd / "energy.json").read_text()) if (wd / "energy.json").exists() else {}
+    energy = util.read_json(wd / "energy.json", {})
     return analyze.build_packet(iv, data, energy, current_news_text(cfg)), wd / "contact_sheet.jpg"
 
 
@@ -174,6 +244,9 @@ def render_clip(cfg, clip_id, log):
     clip = db.get_clip(clip_id)
     iv = ensure_source(db.get_interview(clip["interview_id"]), log)
     data = transcribe.load(iv["workdir"])
+    if data:    # a clip stretched past a story section still gets captions
+        data = transcribe.cover(iv["source_path"], iv["title"], iv["workdir"], cfg, data,
+                                clip["start"], clip["end"], log)
     if clip["framing"] == "split" and not (clip.get("gameplay") and Path(clip["gameplay"]).exists()):
         game = match_gameplay(cfg, clip, iv, data)
         if game:
@@ -268,7 +341,10 @@ def queue_pick(cfg, url):
     if not p:
         raise ValueError("That suggestion is no longer in the list.")
     iid = ingest.add_url(cfg, p["url"], "None / unknown")
-    db.update_interview(iid, title=p["title"], pick_reason=p["why"], topic=p.get("topic", ""))
+    db.update_interview(iid, title=p["title"], pick_reason=p["why"], topic=p.get("topic", ""),
+                        duration=p.get("duration") or 0)
+    if p.get("screen"):      # already screened when it was found: no need to do it again
+        screen.save(db.get_interview(iid)["workdir"], dict(p["screen"], available=True))
     return iid
 
 
