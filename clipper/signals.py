@@ -1,7 +1,6 @@
 """Cheap local signals Claude uses alongside the transcript:
 an audio energy map and a contact sheet of frames (who is on screen, watermarks).
 These replace uploading video and audio chunks."""
-import json
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +30,7 @@ def energy_map(media_path, out_dir, window=10.0):
                     key=lambda w: -w["db"])[:12]
     spikes.sort(key=lambda w: w["t"])
     out = {"window": window, "median": round(med, 1), "spikes": spikes, "windows": windows}
-    (Path(out_dir) / "energy.json").write_text(json.dumps(out), encoding="utf-8")
+    util.write_json(Path(out_dir) / "energy.json", out)
     return out
 
 
@@ -47,7 +46,7 @@ def _write_peaks(audio, sr, out_dir):
         frames = np.abs(audio[:n * hop]).reshape(n, hop).max(axis=1)
         top = float(np.percentile(frames, 99.5)) or 1.0
         peaks = np.clip(frames / top * 100, 0, 100).astype(int).tolist()
-    (Path(out_dir) / "peaks.json").write_text(json.dumps({"rate": PEAK_RATE, "peaks": peaks}))
+    util.write_json(Path(out_dir) / "peaks.json", {"rate": PEAK_RATE, "peaks": peaks})
 
 
 def load_peaks(media_path, out_dir):
@@ -58,7 +57,7 @@ def load_peaks(media_path, out_dir):
         _, raw, _ = util.run_bytes(["ffmpeg", "-v", "error", "-i", str(media_path), "-vn", "-ac", "1",
                                     "-ar", str(sr), "-f", "s16le", "-"])
         _write_peaks(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0, sr, out_dir)
-    return json.loads(p.read_text())
+    return util.read_json(p, {"rate": PEAK_RATE, "peaks": []})
 
 
 def energy_summary(e):

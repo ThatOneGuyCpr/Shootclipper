@@ -51,6 +51,11 @@ DEFAULTS = {
     "theme": "system",               # system | light | dark
     "config_version": 2,
     "framing_mode": "split when matched",  # split when matched | alternate (A/B test) | face only
+    "transcribe_mode": "stories",    # stories = find the story sections from YouTube captions first and
+                                     # transcribe only those; full = always transcribe everything
+    "screen_model": "claude-haiku-5-5",  # small model that reads captions to find the stories
+    "find_match_end": True,          # find each 2K capture's winner screen instead of using the end of the file
+    "speaker_tracking": True,        # on shots with several people, crop to whoever is talking
     "pick_mode": "ask",              # ask = Make clips shows found interviews to choose from; auto = picks
     "cleanup_downloads_days": 7,     # delete downloaded interview videos this long after clips are made (0 = never)
     "cleanup_clips_days": 30,        # delete finished clip videos this long after rendering (0 = never)
@@ -95,7 +100,9 @@ def load():
 
 def save(cfg):
     ensure_app_dir()
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    os.replace(tmp, CONFIG_PATH)       # never leaves a half-written settings file
 
 
 # ── API key: Windows Credential Manager via keyring, file fallback ──────────

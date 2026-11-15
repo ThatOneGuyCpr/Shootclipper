@@ -144,64 +144,194 @@ def ensure_model(name, log, progress=None):
                        "an antivirus or firewall may be blocking huggingface.co.")
 
 
-def load_audio(media_path, sr=16000):
-    """Decode any audio/video file to 16 kHz mono float32 with the bundled ffmpeg.
-    (faster-whisper's own decoder depends on PyAV versions that keep changing.)"""
+def load_audio(media_path, start=None, dur=None, sr=16000):
+    """Decode audio (all of it, or `dur` seconds from `start`) to 16 kHz mono float32 with
+    the bundled ffmpeg. Goes through a temp file so a two-hour interview isn't held in
+    memory twice. (faster-whisper's own decoder depends on PyAV versions that keep changing.)"""
+    import os
+    import tempfile
     import numpy as np
-    code, out, err = util.run_bytes(["ffmpeg", "-nostdin", "-v", "error", "-i", str(media_path),
-                                     "-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"])
-    if code != 0 or not out:
-        lines = err.decode("utf-8", "replace").strip().splitlines()
-        raise RuntimeError(f"Couldn't read the audio ({lines[-1] if lines else 'no audio track'})")
-    return np.frombuffer(out, np.float32)
+    fd, raw = tempfile.mkstemp(suffix=".f32", prefix="sc_audio_")
+    os.close(fd)
+    cmd = ["ffmpeg", "-nostdin", "-y", "-v", "error"]
+    if start is not None:
+        cmd += ["-ss", f"{max(0.0, start):.3f}"]
+    cmd += ["-i", str(media_path)]
+    if dur is not None:
+        cmd += ["-t", f"{dur:.3f}"]
+    cmd += ["-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", raw]
+    try:
+        p = util.run(cmd, check=False)
+        if p.returncode != 0 or os.path.getsize(raw) == 0:
+            lines = (p.stderr or "").strip().splitlines()
+            raise RuntimeError(f"Couldn't read the audio ({lines[-1] if lines else 'no audio track'})")
+        return np.fromfile(raw, dtype=np.float32)
+    finally:
+        try:
+            os.remove(raw)
+        except OSError:
+            pass
 
 
-def transcribe(media_path, title, out_dir, cfg, log, progress=None):
+_loaded = {}  # the Whisper model stays loaded between calls (render-time fill-ins reuse it)
+
+
+def _model(cfg, log, progress=None):
     from faster_whisper import WhisperModel
 
-    out_dir = Path(out_dir)
     device = detect_device(cfg.get("device", "auto"))
-    model_name = pick_model(cfg.get("whisper_model", "auto"), device)
-    log(f"   Whisper model: {model_name} on {device.upper()}")
-
+    name = pick_model(cfg.get("whisper_model", "auto"), device)
+    if _loaded.get("key") == (name, device):
+        return _loaded["model"], name
+    log(f"   Whisper model: {name} on {device.upper()}")
     try:
-        model = WhisperModel(str(ensure_model(model_name, log, progress)), device=device,
+        model = WhisperModel(str(ensure_model(name, log, progress)), device=device,
                              compute_type="float16" if device == "cuda" else "int8")
+    except jobs.Cancelled:
+        raise
     except Exception as e:
-        if device == "cuda":
-            log(f"   GPU load failed ({str(e)[:120]}), falling back to CPU")
-            device = "cpu"
-            model_name = pick_model(cfg.get("whisper_model", "auto"), device)
-            model = WhisperModel(str(ensure_model(model_name, log, progress)), device="cpu",
-                                 compute_type="int8")
-        else:
+        if device != "cuda":
             raise
+        log(f"   GPU load failed ({str(e)[:120]}), falling back to CPU")
+        device = "cpu"
+        name = pick_model(cfg.get("whisper_model", "auto"), device)
+        model = WhisperModel(str(ensure_model(name, log, progress)), device="cpu", compute_type="int8")
+    _loaded.update(key=(name, device), model=model)
+    return model, name
 
-    names = config.load_names() + [a for v in config.load_aliases().values() for a in v if len(a) > 3]
-    prompt = build_prompt(title, names)
-    fixes = config.load_fixes()
-    audio = load_audio(media_path)
-    segments_iter, info = model.transcribe(
+
+def _whisper(model, media_path, start, length, prompt, fixes, on_progress=None):
+    """Transcribe `length` seconds from `start`. Times in the result are in whole-file seconds."""
+    audio = load_audio(media_path, start, length)
+    segments_iter, _ = model.transcribe(
         audio, language="en", beam_size=5, word_timestamps=True,
         vad_filter=True, vad_parameters={"min_silence_duration_ms": 500},
         initial_prompt=prompt, condition_on_previous_text=False,
     )
-    duration = info.duration or 0
-    segments = []
+    off = start or 0.0
+    span = len(audio) / 16000.0
+    out = []
     for seg in segments_iter:
         jobs.check()
-        words = [{"w": w.word.strip(), "s": round(w.start, 3), "e": round(w.end, 3)}
+        words = [{"w": w.word.strip(), "s": round(w.start + off, 3), "e": round(w.end + off, 3)}
                  for w in (seg.words or []) if w.word.strip()]
         words = apply_fixes(words, fixes)
         text = " ".join(w["w"] for w in words) if words else seg.text.strip()
-        segments.append({"start": round(seg.start, 3), "end": round(seg.end, 3),
-                         "text": text, "words": words})
-        if progress and duration:
-            progress(min(1.0, seg.end / duration))
+        out.append({"start": round(seg.start + off, 3), "end": round(seg.end + off, 3),
+                    "text": text, "words": words})
+        if on_progress and span:
+            on_progress(min(1.0, seg.end / span))
+    return out
 
-    data = {"duration": duration, "model": model_name, "segments": segments}
-    (out_dir / "transcript.json").write_text(json.dumps(data), encoding="utf-8")
-    write_txt(data, title, out_dir / "transcript.txt")
+
+def _prompt_and_fixes(title):
+    names = config.load_names() + [a for v in config.load_aliases().values() for a in v if len(a) > 3]
+    return build_prompt(title, names), config.load_fixes()
+
+
+def normalize_ranges(ranges, duration):
+    """Sort, clip to the file and merge overlapping [start, end] pairs."""
+    out = []
+    for a, b in sorted((float(a), float(b)) for a, b in ranges or []):
+        a, b = max(0.0, a), (min(duration, b) if duration else b)
+        if b - a < 0.5:
+            continue
+        if out and a <= out[-1][1] + 0.01:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([round(a, 2), round(b, 2)])
+    return out
+
+
+def transcribe(media_path, title, out_dir, cfg, log, progress=None, ranges=None):
+    """Transcribe the whole file, or only `ranges` ([[start, end], ...] in seconds).
+    A partial transcript records what it covers, so missing stretches can be filled in later."""
+    out_dir = Path(out_dir)
+    duration = util.probe(media_path)["duration"]
+    ranges = normalize_ranges(ranges, duration)
+    partial = bool(ranges)
+    if partial and sum(b - a for a, b in ranges) > 0.85 * duration:
+        ranges, partial = [], False                 # nearly everything: just do it all
+    todo = ranges if partial else [[0.0, duration]]
+    model, model_name = _model(cfg, log, progress)
+    prompt, fixes = _prompt_and_fixes(title)
+    total = sum(b - a for a, b in todo) or 1.0
+    if partial:
+        log(f"   transcribing {len(todo)} story sections ({util.ts(total)} of {util.ts(duration)})")
+    segments, done = [], 0.0
+    for a, b in todo:
+        jobs.check()
+        base = done
+
+        def on_progress(frac, base=base, length=b - a):
+            if progress:
+                progress(min(1.0, (base + frac * length) / total))
+        segments += _whisper(model, media_path, a if partial else None, (b - a) if partial else None,
+                             prompt, fixes, on_progress)
+        done += b - a
+    data = {"duration": duration, "model": model_name, "segments": segments,
+            "partial": partial, "ranges": todo}
+    save(out_dir, data, title)
+    return data
+
+
+def save(out_dir, data, title=""):
+    out_dir = Path(out_dir)
+    util.write_json(out_dir / "transcript.json", data)
+    write_txt(data, title or "interview", out_dir / "transcript.txt")
+
+
+def covered(data):
+    """The stretches a transcript covers, as [[start, end], ...]."""
+    if data.get("partial"):
+        return data.get("ranges") or []
+    return [[0.0, float(data.get("duration") or 0) or 1e9]]
+
+
+def missing(data, start, end):
+    """Parts of [start, end] the transcript doesn't cover."""
+    gaps, at = [], float(start)
+    for a, b in covered(data):
+        if b <= at:
+            continue
+        if a >= end:
+            break
+        if a > at:
+            gaps.append([at, min(a, end)])
+        at = max(at, b)
+    if at < end:
+        gaps.append([at, float(end)])
+    return [[a, b] for a, b in gaps if b - a >= 1.0]
+
+
+def cover(media_path, title, out_dir, cfg, data, start, end, log, margin=2.0):
+    """Make sure the transcript covers [start, end] (a clip stretched past a story section
+    in Review, say). Transcribes only what's missing and saves. Returns the transcript."""
+    if not data or not data.get("partial"):
+        return data
+    duration = float(data.get("duration") or 0)
+    gaps = missing(data, max(0.0, start - margin), min(duration, end + margin) if duration else end + margin)
+    if not gaps:
+        return data
+    log(f"   transcribing {util.ts(sum(b - a for a, b in gaps))} more to cover this clip…")
+    model, _ = _model(cfg, log)
+    prompt, fixes = _prompt_and_fixes(title)
+    new = []
+    for a, b in gaps:
+        jobs.check()
+        new += [s for s in _whisper(model, media_path, a, b - a, prompt, fixes)]
+    # Words that straddle an old boundary would be doubled: keep the existing ones.
+    old = data["segments"]
+    taken = [(s["start"], s["end"]) for s in old]
+    for seg in new:
+        seg["words"] = [w for w in seg["words"]
+                        if not any(a - 0.02 <= w["s"] and w["e"] <= b + 0.02 for a, b in taken)]
+        seg["text"] = " ".join(w["w"] for w in seg["words"]) or seg["text"]
+    data["segments"] = sorted(old + [s for s in new if s["words"]], key=lambda s: s["start"])
+    data["ranges"] = normalize_ranges(covered(data) + gaps, duration)
+    if duration and sum(b - a for a, b in data["ranges"]) >= duration - 1.0:
+        data["partial"] = False
+    save(out_dir, data, title)
     return data
 
 
@@ -213,8 +343,8 @@ def write_txt(data, title, path):
 
 
 def load(workdir):
-    p = Path(workdir) / "transcript.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+    data = util.read_json(Path(workdir) / "transcript.json")
+    return data if isinstance(data, dict) and "segments" in data else None
 
 
 def all_words(data):

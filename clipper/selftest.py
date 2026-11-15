@@ -87,7 +87,23 @@ def _checks():
         return f"anthropic {anthropic.__version__}, yt-dlp {yt_dlp.version.__version__}, " \
                f"pywebview {getattr(webview, '__version__', '?')}"
 
-    return [("bundled files", bundled_files), ("ffmpeg", ffmpeg), ("caption render", caption_render),
+    def downloader_update():
+        # A newer yt-dlp fetched at runtime must take over from the built-in one, and the
+        # built-in one must come back when the fetched copy is removed.
+        from . import ytdlp
+        builtin = ytdlp.version()
+        fake = ytdlp._dir() / "2099.1.1" / "yt_dlp"
+        fake.mkdir(parents=True, exist_ok=True)
+        (fake / "__init__.py").write_text("from . import version\nclass YoutubeDL:\n    pass\n")
+        (fake / "version.py").write_text("__version__ = '2099.01.01'\n")
+        try:
+            assert ytdlp.version() == "2099.01.01", "a fetched copy did not take over"
+        finally:
+            shutil.rmtree(fake.parent, ignore_errors=True)
+        assert ytdlp.version() == builtin, "the built-in copy did not come back"
+        return f"built-in {builtin}"
+
+    return [("bundled files", bundled_files), ("downloader update", downloader_update), ("ffmpeg", ffmpeg), ("caption render", caption_render),
             ("face detector", face_detector), ("libraries", libraries), ("whisper", whisper)]
 
 

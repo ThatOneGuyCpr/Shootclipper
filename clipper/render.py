@@ -1,7 +1,8 @@
 """Turn an approved clip into an upload-ready 1080x1920 MP4.
 
 Pipeline (one ffmpeg pass per clip):
-  optional context card (blurred still + text)  ->  clip with face-tracked 9:16 crop
+  optional context card (blurred still + text)  ->  clip with a 9:16 crop that follows the
+  speaker (see tracking.py)
   (or blurred-background "wide" layout), watermark bar, hook text, word-highlight captions,
   loudness-normalized audio.
 """
@@ -11,9 +12,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import numpy as np
 
-from . import config, transcribe, util
+from . import config, matchend, tracking, transcribe, util
 
 OUT_W, OUT_H, FPS = 1080, 1920, 30
 # TikTok's UI covers the bottom ~20% and a column of icons on the right,
@@ -24,150 +24,6 @@ HOOK_MARGIN_V = 250
 SIDE_L, SIDE_R = 90, 170
 
 SWEARS = ("fuck", "shit", "bitch", "cunt", "pussy", "dick", "cock", "whore", "slut")
-
-
-# ── face tracking ───────────────────────────────────────────────────────────
-
-YUNET = config.BUNDLED_DATA / "face_detection_yunet_2023mar.onnx"
-
-
-def _make_detector(cv2, w, h, min_face):
-    """YuNet (bundled ONNX, much better on profiles and busy backdrops); Haar as fallback."""
-    if hasattr(cv2, "FaceDetectorYN") and YUNET.exists():
-        yn = cv2.FaceDetectorYN.create(str(YUNET), "", (w, h), 0.7, 0.3, 50)
-
-        def detect(small, gray):
-            _, found = yn.detect(small)
-            if found is None:
-                return []
-            return [tuple(int(v) for v in f[:4]) for f in found
-                    if f[2] >= min_face * 0.8]
-        return detect
-
-    front = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    profile = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
-
-    def detect(small, gray):
-        faces = list(front.detectMultiScale(gray, 1.1, 6, minSize=(min_face, min_face)))
-        if not faces:
-            faces = list(profile.detectMultiScale(gray, 1.1, 6, minSize=(min_face, min_face)))
-            flipped = cv2.flip(gray, 1)
-            for (x, y, fw, fh) in profile.detectMultiScale(flipped, 1.1, 6,
-                                                          minSize=(min_face, min_face)):
-                faces.append((w - x - fw, y, fw, fh))
-        return faces
-    return detect
-
-
-def face_track(src, start, dur, src_w, src_h, crop_w, log=None, stats=None):
-    """Return a list of (t, x_left) for the crop window, at 30 fps, relative to clip start.
-    If a dict is passed as stats, it gets the median face centre-y and face height (source px)."""
-    import cv2
-
-    cap = cv2.VideoCapture(str(src))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
-
-    sample_every = max(1, round(fps / 5))  # ~5 detections per second
-    scale = 480 / src_w
-    small_h = int(src_h * scale)
-    min_face = max(24, int(small_h / 9))
-    detect = _make_detector(cv2, 480, small_h, min_face)
-    samples = []  # (t, cx_or_None, is_cut)
-    ys = []       # (face centre y, face height)
-    prev_thumb = None
-    prev_cx = None
-    i = 0
-    while True:
-        if not cap.grab():
-            break
-        t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0 - start
-        if t > dur + 0.1:
-            break
-        if t < -0.05:
-            i += 1
-            continue
-        if i % sample_every == 0:
-            ok, frame = cap.retrieve()
-            if not ok:
-                break
-            small = cv2.resize(frame, (480, small_h))
-            gray = cv2.equalizeHist(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
-            thumb = cv2.resize(gray, (64, 36)).astype(np.int16)
-            is_cut = prev_thumb is not None and float(np.mean(np.abs(thumb - prev_thumb))) > 28
-            prev_thumb = thumb
-            faces = detect(small, gray)
-            cx = None
-            if faces:
-                faces.sort(key=lambda f: -f[2] * f[3])
-                best = faces[0]
-                if prev_cx is not None and not is_cut:
-                    # Prefer staying on the same person unless they've clearly gone.
-                    near = [f for f in faces if abs((f[0] + f[2] / 2) / scale - prev_cx) < src_w * 0.15
-                            and f[2] * f[3] >= 0.5 * best[2] * best[3]]
-                    if near:
-                        best = near[0]
-                cx = (best[0] + best[2] / 2) / scale
-                prev_cx = cx
-                ys.append(((best[1] + best[3] / 2) / scale, best[3] / scale))
-            samples.append((max(0.0, t), cx, is_cut))
-        i += 1
-    cap.release()
-    if stats is not None and ys:
-        stats["cy"] = float(np.median([y for y, _ in ys]))
-        stats["fh"] = float(np.median([h for _, h in ys]))
-
-    center = src_w / 2
-    if not samples or all(s[1] is None for s in samples):
-        if log:
-            log("      no face found, using center crop")
-        return [(0.0, int((src_w - crop_w) / 2) // 2 * 2)]
-
-    # Split into shots at cuts, fill gaps inside each shot, median-filter jitter.
-    shots, cur = [], []
-    for s in samples:
-        if s[2] and cur:
-            shots.append(cur)
-            cur = []
-        cur.append(s)
-    shots.append(cur)
-
-    keyframes = []  # (t, cx, snap)
-    for shot in shots:
-        vals = [s[1] for s in shot]
-        known = [v for v in vals if v is not None]
-        fill = known[0] if known else (keyframes[-1][1] if keyframes else center)
-        filled = []
-        for v in vals:
-            fill = v if v is not None else fill
-            filled.append(fill)
-        med = [float(np.median(filled[max(0, k - 3):k + 4])) for k in range(len(filled))]
-        for k, s in enumerate(shot):
-            keyframes.append((s[0], med[k], k == 0))
-
-    # Dead zone + easing so the frame holds still while someone talks and glides when they move.
-    dead = src_w * 0.04
-    pos = keyframes[0][1]
-    eased = []
-    for t, cx, snap in keyframes:
-        if snap:
-            pos = cx
-        elif abs(cx - pos) > dead:
-            pos += (cx - pos) * 0.35
-        eased.append((t, pos))
-
-    # Interpolate to every output frame.
-    ts_ = np.array([e[0] for e in eased])
-    xs_ = np.array([e[1] for e in eased])
-    out = []
-    n = int(dur * FPS) + 1
-    for f in range(n):
-        t = f / FPS
-        cx = float(np.interp(t, ts_, xs_))
-        x = int(min(max(cx - crop_w / 2, 0), src_w - crop_w)) // 2 * 2
-        if not out or out[-1][1] != x:
-            out.append((round(t, 3), x))
-    return out
 
 
 # ── subtitles ───────────────────────────────────────────────────────────────
@@ -321,28 +177,38 @@ def output_name(clip, interview_title):
     return f"{clip['id']:04d}_{util.slug(interview_title, 30)}_{util.slug(clip['title'], 40)}.mp4"
 
 
-def gameplay_plan(files, dur, speed, max_segments=16):
+def gameplay_plan(files, dur, speed, max_segments=16, ends=None):
     """Decide which stretch of which 2K capture plays, in order, at a fixed speed.
 
     The primary capture (files[0]) always ends exactly as the clip ends, so the finish
     and Winner screen land on the last frame. Returns [(path, start, length, loop)] in
     source seconds. If the match is longer than needed it starts partway in; if shorter,
-    other captures of the same matchup (files[1:]) play first; with none, it loops.
+    other captures of the same matchup (files[1:]) play first; with none, it repeats.
+
+    ends: {path: {"first": t, "end": t}} for captures whose finish has been found
+    (matchend.finish). The primary stops at its "end" instead of the end of the file, and
+    a capture used as filler stops at "first", before its own winner screen.
     """
+    ends = ends or {}
     need = dur * speed
     primary = files[0]
-    g = util.probe(primary)["duration"]
-    if g <= 0.5:
+    full = util.probe(primary)["duration"]
+    if full <= 0.5:
         raise RuntimeError(f"2K capture is unreadable or empty: {primary}")
+    known = primary in ends
+    g = min(full, float(ends[primary]["end"])) if known else full
     if g >= need:
         return [(primary, g - need, need, False)]
     others = [f for f in files[1:] if Path(f).exists()]
-    if not others:
+    if not others and not known:
         s0 = (g - (need % g)) % g
         return [(primary, s0, need, True)]
     segs, remaining = [(primary, 0.0, g, False)], need - g
     cycle = list(reversed(others)) + [primary]      # walking backwards from the finish
-    durs = {f: util.probe(f)["duration"] for f in set(cycle)}
+    durs = {}
+    for f in set(cycle):
+        d = full if f == primary else util.probe(f)["duration"]
+        durs[f] = min(d, float(ends[f]["first"])) if f in ends else d
     i = 0
     while remaining > 0.05 and len(segs) < max_segments:
         f = cycle[i % len(cycle)]
@@ -422,14 +288,31 @@ def render_clip(cfg, interview, clip, transcript, out_dir, log):
                 crop_h = int(crop_w / aspect) // 2 * 2
             log("      tracking faces…")
             stats = {}
-            track = face_track(src, start, dur, sw, sh, crop_w, log, stats)
+            track = tracking.face_track(src, start, dur, sw, sh, crop_w, log, stats,
+                                        speakers=cfg.get("speaker_tracking", True))
             cy = stats.get("cy", sh * 0.42)
             y = cy - crop_h * 0.42                      # eyes a little above centre
             band = float(preset.get("height", 0)) if preset.get("bar") == "bottom" else 0
             if band:                                    # keep burned-in lower-third watermarks out
                 y = min(y, sh * (1 - band) - crop_h)
             y = int(min(max(y, 0), sh - crop_h)) // 2 * 2
-            cmds = "\n".join(f"{t:.3f} crop@track x {x};" for t, x in track)
+
+            def y_for(face_cy):
+                v = face_cy - crop_h * 0.42
+                if band:
+                    v = min(v, sh * (1 - band) - crop_h)
+                return int(min(max(v, 0), sh - crop_h)) // 2 * 2
+            # People sit at different heights, and so do different camera shots: move the crop
+            # up or down at the same moments it cuts sideways.
+            moves = {}
+            for t, x in track:
+                moves.setdefault(round(t, 3), []).append(f"crop@track x {x}")
+            heights = stats.get("heights") or []
+            if len({y_for(c) for _, c in heights}) > 1:
+                y = y_for(heights[0][1])
+                for t, c in heights:
+                    moves.setdefault(round(t, 3), []).append(f"crop@track y {y_for(c)}")
+            cmds = "\n".join(f"{t:.3f} {', '.join(moves[t])};" for t in sorted(moves))
             (tmp / "cmds.txt").write_text(cmds + "\n", encoding="utf-8")
             frame_chain = (
                 f"sendcmd=f=cmds.txt,crop@track={crop_w}:{crop_h}:{track[0][1]}:{y},"
@@ -448,7 +331,8 @@ def render_clip(cfg, interview, clip, transcript, out_dir, log):
             crop_w = min(sw, int(round(sh * 9 / 16)) // 2 * 2)
             if framing == "face" and crop_w < sw:
                 log("      tracking faces…")
-                track = face_track(src, start, dur, sw, sh, crop_w, log)
+                track = tracking.face_track(src, start, dur, sw, sh, crop_w, log,
+                                            speakers=cfg.get("speaker_tracking", True))
                 cmds = "\n".join(f"{t:.3f} crop@track x {x};" for t, x in track)
                 (tmp / "cmds.txt").write_text(cmds + "\n", encoding="utf-8")
                 x0 = track[0][1]
@@ -500,7 +384,19 @@ def render_clip(cfg, interview, clip, transcript, out_dir, log):
         ain, nxt, gamechain = vin, vin + 1, ""
         if framing == "split":
             speed = min(8.0, max(0.25, float(cfg.get("gameplay_speed", 2.0))))
-            plan = gameplay_plan([game] + list(clip.get("gameplay_extra") or []), dur, speed)
+            files = [game] + list(clip.get("gameplay_extra") or [])
+            # Where does the match really end? (Found once per capture, then remembered.)
+            ends = {}
+            hit = matchend.finish(game, cfg, log)
+            if hit:
+                ends[game] = hit
+            reach = hit["end"] if hit else util.probe(game)["duration"]
+            if reach < dur * speed:                 # other captures will fill in before it
+                for f in files[1:]:
+                    other = matchend.finish(f, cfg, log)
+                    if other:
+                        ends[f] = other
+            plan = gameplay_plan(files, dur, speed, ends=ends)
             if len(plan) > 1:
                 log(f"      2K: {len(plan)} captures chained at {speed:g}x")
             g_inputs, gamechain = _gameplay_inputs(plan, nxt, speed, OUT_W, SPLIT_GAME_H)

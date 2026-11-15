@@ -14,7 +14,8 @@ import traceback
 from pathlib import Path
 from urllib.parse import quote
 
-from . import applog, cleanup, config, db, ingest, jobs, news, pipeline, render, signals, transcribe, updater, util
+from . import (applog, cleanup, config, db, ingest, jobs, news, pipeline, render, signals, transcribe,
+               updater, util, ytdlp)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -23,7 +24,7 @@ STATUS_LABEL = {
     "prepped": "Ready to analyze", "needs_paste": "Waiting for paste",
     "analyzed": "Clips suggested", "done": "Done", "error": "Error",
 }
-STEP_LABELS = {"news": "News", "download": "Download", "transcribe": "Transcribe",
+STEP_LABELS = {"news": "News", "screen": "Find stories", "download": "Download", "transcribe": "Transcribe",
                "analyze": "Analyze", "render": "Render", "preview": "Preview file"}
 CLIP_FIELDS = {"start", "end", "hook", "context_card", "caption", "hashtags", "framing",
                "gameplay", "speaker", "notes"}
@@ -71,6 +72,7 @@ class Api:
         if updater.FROZEN:
             threading.Thread(target=self._check_update_bg, daemon=True).start()
         threading.Thread(target=self._cleanup_bg, daemon=True).start()
+        threading.Thread(target=lambda: ytdlp.update_if_due(self._log), daemon=True).start()
 
     # ── internals ───────────────────────────────────────────────────────────
 
@@ -96,7 +98,7 @@ class Api:
     def _start(self, label, steps, fn):
         with self._lock:
             if self._busy:
-                raise RuntimeError("Something is already running. It will finish first.")
+                raise RuntimeError(f"{self._label} is still running. Press Stop first, or wait for it.")
             self._busy, self._label, self._job_error, self._progress = True, label, "", 0.0
             self._steps = [{"key": k, "label": STEP_LABELS[k], "state": "pending"} for k in steps]
             jobs.reset()
@@ -119,6 +121,9 @@ class Api:
                         if s["state"] == "active":
                             s["state"] = "error"
             finally:
+                # Clear a pressed Stop, or it would kill the next ffmpeg call the interface
+                # makes on its own (thumbnails, previews).
+                jobs.reset()
                 with self._lock:
                     for s in self._steps:
                         if s["state"] == "active":
@@ -222,7 +227,6 @@ class Api:
             "clips": by_iv.get(i["id"], 0), "duration": i.get("duration") or 0,
             "topic": i.get("topic") or "", "error": i.get("error") or "", "url": i.get("url") or "",
         } for i in rows if i["status"] != "archived"][:60]
-        used = {i["url"] for i in rows if i.get("url")}
         return {
             "cfg": cfg, "has_key": bool(config.get_api_key()),
             "ffmpeg": util.have("ffmpeg") and util.have("ffprobe"),
@@ -242,13 +246,19 @@ class Api:
 
     def _go(self, label, iid=None, ask=False):
         def job():
-            outs = pipeline.go(self._cfg, self._log, self._set_progress, self._step, iid=iid, ask=ask)
+            lock = util.RunLock(config.APP_DIR / "run.lock")
+            if not lock.acquire():
+                raise RuntimeError("The daily run is making clips right now. Try again when it finishes.")
+            try:
+                outs = pipeline.go(self._cfg, self._log, self._set_progress, self._step, iid=iid, ask=ask)
+            finally:
+                lock.release()
             if outs and self._cfg.get("open_folder_when_done"):
                 try:
                     util.open_path(pipeline.ready_dir(self._cfg))
                 except Exception:
                     pass
-        return self._start(label, ["download", "transcribe", "analyze", "render"], job)
+        return self._start(label, ["screen", "download", "transcribe", "analyze", "render"], job)
 
     @exposed
     def make_clips(self):
@@ -292,7 +302,7 @@ class Api:
 
     @exposed
     def run_interview(self, iid):
-        return self._start("Processing interview", ["download", "transcribe", "analyze"],
+        return self._start("Processing interview", ["screen", "download", "transcribe", "analyze"],
                            lambda: pipeline.process_interview(self._cfg, int(iid), self._log,
                                                               self._set_progress, self._step))
 
@@ -470,8 +480,24 @@ class Api:
             "output_url": self._media(c.get("output_path")),
             "gameplay_name": Path(c["gameplay"]).name if c.get("gameplay") else "",
             "window": [w0, w1], "words": words, "peaks": peaks, "peak_rate": rate,
+            "gaps": transcribe.missing(data, w0, w1) if data.get("partial") else [],
             "speed": self._cfg.get("gameplay_speed", 2.0),
         }
+
+    @exposed
+    def extend_transcript(self, cid):
+        """Transcribe a minute either side of a clip, for interviews where only the story
+        sections were transcribed and you want to move a clip's edges past them."""
+        c = db.get_clip(int(cid))
+        iv = db.get_interview(c["interview_id"])
+
+        def job():
+            self._step("transcribe", "active")
+            src = pipeline.ensure_source(iv, self._log)
+            data = transcribe.load(src["workdir"])
+            transcribe.cover(src["source_path"], src["title"], src["workdir"], self._cfg, data,
+                             max(0.0, c["start"] - 60), c["end"] + 60, self._log, margin=0)
+        return self._start("Transcribing more", ["transcribe"], job)
 
     @exposed
     def update_clip(self, cid, fields):

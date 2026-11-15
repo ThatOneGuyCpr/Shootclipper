@@ -82,6 +82,9 @@ def download(url, progress=None):
             done += len(chunk)
             if progress and total:
                 progress(done / total)
+    if total and done != total:
+        dest.unlink(missing_ok=True)
+        raise RuntimeError("The update download was cut short. Check your connection and try again.")
     return dest
 
 

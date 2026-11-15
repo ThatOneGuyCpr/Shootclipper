@@ -42,6 +42,76 @@ def usage_tokens(usage):
     return tin, usage.output_tokens or 0
 
 
+def explain(e, model=""):
+    """Turn an Anthropic SDK error into a sentence that says what to do. Returns None for
+    anything that isn't an API error."""
+    try:
+        import anthropic
+    except Exception:
+        return None
+    if not isinstance(e, anthropic.APIError):
+        return None
+    text = str(getattr(e, "message", "") or e).lower()
+    status = getattr(e, "status_code", None)
+    if isinstance(e, (anthropic.APITimeoutError, anthropic.APIConnectionError)) and status is None:
+        return "Couldn't reach Claude. Check your internet connection and try again."
+    if status == 401:
+        return "Claude rejected the API key. Paste a fresh one in Settings."
+    if "credit balance" in text or "billing" in text:
+        return ("Your Claude API credit has run out. Add credit at platform.claude.com under "
+                "Billing, then try again.")
+    if status == 403:
+        return "This API key isn't allowed to do that. Check the key's permissions at platform.claude.com."
+    if status == 404 and "model" in text:
+        return f"The model “{model}” isn't available on this key. Pick another one in Settings."
+    if status == 429:
+        return "Claude is rate-limiting this key right now. Wait a minute and try again."
+    if status == 413 or "too long" in text or "too large" in text:
+        return "This interview is too long to send to Claude in one piece."
+    if status and status >= 500:
+        return "Claude's servers are busy right now. Try again in a few minutes."
+    return None
+
+
+def friendly(fn):
+    """Decorator: re-raise API errors as RuntimeError with a plain-language message."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrap(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except jobs.Cancelled:
+            raise
+        except Exception as e:
+            msg = explain(e, kw.get("model", ""))
+            if msg:
+                raise RuntimeError(msg) from e
+            raise
+    return wrap
+
+
+def client():
+    import anthropic
+    from . import config
+    key = config.get_api_key()
+    if not key:
+        raise RuntimeError("No API key saved. Add one in Settings, or switch Analysis to Paste.")
+    return anthropic.Anthropic(api_key=key)
+
+
+def cost(model, responses, searches=0):
+    """Dollar cost of a list of responses at the listed prices."""
+    from . import config
+    pin, pout = config.MODEL_PRICES.get(model, (2.0, 10.0))
+    total = searches * 0.01
+    for r in responses:
+        tin, tout = usage_tokens(r.usage)
+        total += tin / 1e6 * pin + tout / 1e6 * pout
+    return total
+
+
+@friendly
 def structured(client, *, model, schema, messages, system=None, max_tokens=4000):
     """One call whose reply is a JSON object matching `schema`.
 

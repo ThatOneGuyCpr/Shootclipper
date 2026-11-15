@@ -9,7 +9,7 @@ import json
 import re
 from pathlib import Path
 
-from . import config, db, jobs, llm
+from . import config, db, jobs, llm, screen, util, ytdlp
 
 WEB_SEARCH_TOOL = {"type": "web_search_20260318", "name": "web_search", "max_uses": 5,
                    "response_inclusion": "excluded"}
@@ -109,18 +109,7 @@ Return up to 6 picks, best first. Use the exact URLs given."""
 
 
 def _client():
-    import anthropic
-    key = config.get_api_key()
-    if not key:
-        raise RuntimeError("No API key saved (Settings).")
-    return anthropic.Anthropic(api_key=key)
-
-
-def _cost(model, usage, searches=0):
-    pin, pout = config.MODEL_PRICES.get(model, (2.0, 10.0))
-    tin = (usage.input_tokens or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0) \
-        + (getattr(usage, "cache_read_input_tokens", 0) or 0)
-    return tin / 1e6 * pin + (usage.output_tokens or 0) / 1e6 * pout + searches * 0.01
+    return llm.client()
 
 
 def _dump(block):
@@ -132,15 +121,18 @@ def news_path(cfg):
 
 
 def load_news(cfg):
-    p = news_path(cfg)
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+    n = util.read_json(news_path(cfg))
+    return n if isinstance(n, dict) and n.get("topics") else None
 
 
 def news_is_fresh(cfg):
     n = load_news(cfg)
     if not n:
         return False
-    age = dt.datetime.now() - dt.datetime.fromisoformat(n["fetched_at"])
+    try:
+        age = dt.datetime.now() - dt.datetime.fromisoformat(n["fetched_at"])
+    except (KeyError, ValueError):
+        return False
     return age.total_seconds() < float(cfg.get("news_refresh_days", 2)) * 86400
 
 
@@ -158,10 +150,9 @@ def scout(cfg, log):
     total, notes = 0.0, ""
     log("   scouting this week's wrestling news…")
     for _ in range(6):
-        resp = client.messages.create(model=model, max_tokens=6000, tools=[WEB_SEARCH_TOOL],
-                                      messages=messages)
+        resp = _search_turn(client, model=model, messages=messages)
         searches = getattr(getattr(resp.usage, "server_tool_use", None), "web_search_requests", 0) or 0
-        total += _cost(model, resp.usage, searches)
+        total += llm.cost(model, [resp], searches)
         notes += "".join(getattr(b, "text", "") for b in resp.content
                          if getattr(b, "type", "") == "text")
         if resp.stop_reason != "pause_turn":
@@ -172,14 +163,24 @@ def scout(cfg, log):
     result, responses = llm.structured(
         client, model=model, schema=TOPICS_SCHEMA, max_tokens=4000,
         messages=[{"role": "user", "content": STRUCTURE_PROMPT.format(today=today, notes=notes)}])
-    total += sum(_cost(model, r.usage) for r in responses)
+    total += llm.cost(model, responses)
     if not result.get("topics"):
         raise RuntimeError("News scout didn't return topics.")
     result["fetched_at"] = dt.datetime.now().isoformat(timespec="seconds")
     result["cost"] = round(total, 4)
-    news_path(cfg).write_text(json.dumps(result, indent=2), encoding="utf-8")
+    util.write_json(news_path(cfg), result, indent=2)
     log(f"   {len(result['topics'])} topics found, about ${total:.3f}")
     return result
+
+
+@llm.friendly
+def _search_turn(client, *, model, messages):
+    """One web-search turn, streamed so Stop works while Claude is searching."""
+    with client.messages.stream(model=model, max_tokens=6000, tools=[WEB_SEARCH_TOOL],
+                                messages=messages) as stream:
+        for _ in stream:
+            jobs.check()
+        return stream.get_final_message()
 
 
 def topics_text(news, limit=10):
@@ -202,9 +203,8 @@ def _load_list(name):
 
 
 def youtube_search(query, n=6):
-    import yt_dlp
     opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with ytdlp.session() as yt_dlp, yt_dlp.YoutubeDL(opts) as ydl:
         res = ydl.extract_info(f"ytsearch{n}:{query}", download=False)
     out = []
     for e in res.get("entries") or []:
@@ -229,24 +229,33 @@ def discover(cfg, news, log):
     cands, seen = [], set()
     topics = sorted(news.get("topics", []), key=lambda t: -t.get("urgency", 0))[:6]
     log(f"   searching YouTube for {len(topics)} topics…")
-    for t in topics:
-        for q in t.get("youtube_queries", [])[:2]:
-            try:
-                jobs.check()
-                for c in youtube_search(q):
-                    if c["url"] in seen or c["url"] in done:
-                        continue
-                    if c["channel"].lower() in blocked:
-                        continue
-                    if not (180 <= c["duration"] <= 3 * 3600):
-                        continue
-                    seen.add(c["url"])
-                    c["found_for"] = t["topic"]
-                    cands.append(c)
-            except jobs.Cancelled:
-                raise
-            except Exception as e:
-                log(f"   search failed for '{q}': {str(e)[:80]}")
+
+    def search():
+        failed = 0
+        for t in topics:
+            for q in t.get("youtube_queries", [])[:2]:
+                try:
+                    jobs.check()
+                    for c in youtube_search(q):
+                        if c["url"] in seen or c["url"] in done:
+                            continue
+                        if c["channel"].lower() in blocked:
+                            continue
+                        if not (180 <= c["duration"] <= 3 * 3600):
+                            continue
+                        seen.add(c["url"])
+                        c["found_for"] = t["topic"]
+                        cands.append(c)
+                except jobs.Cancelled:
+                    raise
+                except Exception as e:
+                    failed += 1
+                    log(f"   search failed for '{q}': {str(e)[:80]}")
+        return failed
+
+    # Every search failing usually means YouTube changed something: get a newer yt-dlp and retry.
+    if search() and not cands and ytdlp.update(log):
+        search()
     if not cands:
         raise RuntimeError("YouTube search returned nothing usable.")
     log(f"   ranking {len(cands)} candidates…")
@@ -264,15 +273,61 @@ def discover(cfg, news, log):
     by_url = {c["url"]: c for c in cands}
     picks = [dict(p, **{k: by_url[p["url"]].get(k, 0) for k in ("title", "channel", "duration", "views")})
              for p in picks if p["url"] in by_url]
-    cost = sum(_cost(model, r.usage) for r in responses)
+    cost = llm.cost(model, responses)
     log(f"   {len(picks)} picks, about ${cost:.3f}")
-    (Path(cfg["workspace"]) / "picks.json").write_text(json.dumps(picks, indent=2), encoding="utf-8")
+    if cfg.get("transcribe_mode", "stories") == "stories":
+        picks = screen_picks(cfg, picks, log)
+    # Keep earlier finds you haven't used or turned down; new ones go first.
+    fresh = {p["url"] for p in picks}
+    keep = [p for p in load_picks(cfg) if p["url"] not in fresh and p["url"] not in done]
+    util.write_json(Path(cfg["workspace"]) / "picks.json", (picks + keep)[:24], indent=2)
     return picks
 
 
+def screen_picks(cfg, picks, log):
+    """Read each pick's captions and count its stories. Picks with no real stories are
+    dropped; the rest are ordered by how story-rich they are. Picks whose captions can't
+    be read stay in, unscreened."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not picks:
+        return picks
+    log(f"   reading captions for {len(picks)} interviews to count their stories…")
+    client = _client()
+
+    def one(p):
+        try:
+            return screen.screen_url(cfg, p["url"], client)
+        except jobs.Cancelled:
+            raise
+        except Exception as e:
+            return {"available": False, "reason": str(e)[:160]}
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(one, picks))
+    jobs.check()
+    out, cost, dropped = [], 0.0, 0
+    for p, r in zip(picks, results):
+        cost += r.get("cost", 0) or 0
+        if not r.get("available"):
+            out.append(dict(p, screen=None))
+            continue
+        if r["story_count"] == 0:
+            dropped += 1
+            dismiss(p["url"])            # don't search it up and screen it again next time
+            log(f"   skipped “{p['title'][:60]}”: no real stories in it")
+            continue
+        out.append(dict(p, screen={k: r[k] for k in ("stories", "summary", "story_count",
+                                                     "story_minutes", "score", "top", "duration")}))
+    # Story-rich first. Unscreened picks sit behind anything with a couple of good stories.
+    out.sort(key=lambda p: -(p["screen"]["score"] if p.get("screen") else 2.5))
+    n = sum(1 for p in out if p.get("screen"))
+    log(f"   {n} screened, {dropped} dropped, about ${cost:.3f}")
+    return out
+
+
 def load_picks(cfg):
-    p = Path(cfg["workspace"]) / "picks.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+    p = util.read_json(Path(cfg["workspace"]) / "picks.json", [])
+    return p if isinstance(p, list) else []
 
 
 def _dismissed_path():
@@ -281,17 +336,14 @@ def _dismissed_path():
 
 def dismissed(cfg=None):
     """URLs you turned down with Not this. They never come back as found interviews."""
-    p = _dismissed_path()
-    try:
-        return set(json.loads(p.read_text(encoding="utf-8"))) if p.exists() else set()
-    except Exception:
-        return set()
+    urls = util.read_json(_dismissed_path(), [])
+    return set(urls) if isinstance(urls, list) else set()
 
 
 def dismiss(url):
     urls = dismissed()
     urls.add(url)
-    _dismissed_path().write_text(json.dumps(sorted(urls), indent=1), encoding="utf-8")
+    util.write_json(_dismissed_path(), sorted(urls), indent=1)
 
 
 def scout_packet():
@@ -306,5 +358,5 @@ def save_pasted_topics(cfg, text):
     raw = m.group(1) if m else text[text.find("{"):]
     obj, _ = json.JSONDecoder().raw_decode(raw.strip())
     obj["fetched_at"] = dt.datetime.now().isoformat(timespec="seconds")
-    news_path(cfg).write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    util.write_json(news_path(cfg), obj, indent=2)
     return obj
