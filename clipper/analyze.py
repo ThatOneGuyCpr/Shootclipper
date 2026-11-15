@@ -212,6 +212,8 @@ def ingest_result(interview, data, result):
     for c in result.get("clips", []):
         try:
             want_s, want_e = float(c["start"]), float(c["end"])
+            if want_e - want_s < 3:
+                continue
             s, e = transcribe.snap(data, want_s, want_e)
         except Exception:
             continue

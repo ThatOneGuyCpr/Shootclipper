@@ -1,0 +1,4 @@
+# Needed to test and package the app, not to run it.
+pytest>=8
+pytest-github-actions-annotate-failures>=0.2
+pyinstaller>=6.10

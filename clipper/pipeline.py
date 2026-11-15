@@ -245,8 +245,13 @@ def render_clip(cfg, clip_id, log):
     iv = ensure_source(db.get_interview(clip["interview_id"]), log)
     data = transcribe.load(iv["workdir"])
     if data:    # a clip stretched past a story section still gets captions
-        data = transcribe.cover(iv["source_path"], iv["title"], iv["workdir"], cfg, data,
-                                clip["start"], clip["end"], log)
+        try:
+            data = transcribe.cover(iv["source_path"], iv["title"], iv["workdir"], cfg, data,
+                                    clip["start"], clip["end"], log)
+        except jobs.Cancelled:
+            raise
+        except Exception as e:
+            log(f"   couldn't transcribe the extra stretch ({str(e)[:100]}); captions may stop early")
     if clip["framing"] == "split" and not (clip.get("gameplay") and Path(clip["gameplay"]).exists()):
         game = match_gameplay(cfg, clip, iv, data)
         if game:

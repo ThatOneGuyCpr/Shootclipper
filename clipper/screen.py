@@ -14,7 +14,7 @@ import json
 import re
 from pathlib import Path
 
-from . import jobs, llm, util
+from . import jobs, llm, util, ytdlp
 
 PAD_BEFORE, PAD_AFTER = 30.0, 25.0   # captions are rough, so take generous margins
 MERGE_GAP = 40.0                     # sections closer than this become one
@@ -124,9 +124,8 @@ def _pick_track(info):
 def fetch_captions(url):
     """Returns ({"title", "duration", "channel"}, cues) for a YouTube link. cues is None when
     the video has no English captions or they can't be fetched."""
-    import yt_dlp
     opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with ytdlp.session() as yt_dlp, yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         meta = {"title": info.get("title") or "", "duration": float(info.get("duration") or 0),
                 "channel": info.get("channel") or info.get("uploader") or ""}

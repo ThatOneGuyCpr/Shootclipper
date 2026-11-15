@@ -14,7 +14,8 @@ import traceback
 from pathlib import Path
 from urllib.parse import quote
 
-from . import applog, cleanup, config, db, ingest, jobs, news, pipeline, render, signals, transcribe, updater, util
+from . import (applog, cleanup, config, db, ingest, jobs, news, pipeline, render, signals, transcribe,
+               updater, util, ytdlp)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -71,6 +72,7 @@ class Api:
         if updater.FROZEN:
             threading.Thread(target=self._check_update_bg, daemon=True).start()
         threading.Thread(target=self._cleanup_bg, daemon=True).start()
+        threading.Thread(target=lambda: ytdlp.update_if_due(self._log), daemon=True).start()
 
     # ── internals ───────────────────────────────────────────────────────────
 

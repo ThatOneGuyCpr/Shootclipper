@@ -567,7 +567,7 @@ function wireReview() {
   };
   $("#playSelBtn").onclick = () => { setMode("source"); $("#srcVideo").pause(); togglePlay(true); };
   $("#playBtn").onclick = () => togglePlay();
-  $("#moreTranscript").onclick = () => R.id && attempt(() => call("extend_transcript", R.id));
+  $("#moreTranscript").onclick = () => R.cid && attempt(() => call("extend_transcript", R.cid));
   $("#transcript").onclick = e => {
     const el = e.target.closest("span[data-i]"); if (!el || !R.d) return;
     const w = R.d.words[+el.dataset.i];

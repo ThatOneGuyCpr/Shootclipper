@@ -9,7 +9,7 @@ import json
 import re
 from pathlib import Path
 
-from . import config, db, jobs, llm, screen, util
+from . import config, db, jobs, llm, screen, util, ytdlp
 
 WEB_SEARCH_TOOL = {"type": "web_search_20260318", "name": "web_search", "max_uses": 5,
                    "response_inclusion": "excluded"}
@@ -203,9 +203,8 @@ def _load_list(name):
 
 
 def youtube_search(query, n=6):
-    import yt_dlp
     opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with ytdlp.session() as yt_dlp, yt_dlp.YoutubeDL(opts) as ydl:
         res = ydl.extract_info(f"ytsearch{n}:{query}", download=False)
     out = []
     for e in res.get("entries") or []:
@@ -230,24 +229,33 @@ def discover(cfg, news, log):
     cands, seen = [], set()
     topics = sorted(news.get("topics", []), key=lambda t: -t.get("urgency", 0))[:6]
     log(f"   searching YouTube for {len(topics)} topics…")
-    for t in topics:
-        for q in t.get("youtube_queries", [])[:2]:
-            try:
-                jobs.check()
-                for c in youtube_search(q):
-                    if c["url"] in seen or c["url"] in done:
-                        continue
-                    if c["channel"].lower() in blocked:
-                        continue
-                    if not (180 <= c["duration"] <= 3 * 3600):
-                        continue
-                    seen.add(c["url"])
-                    c["found_for"] = t["topic"]
-                    cands.append(c)
-            except jobs.Cancelled:
-                raise
-            except Exception as e:
-                log(f"   search failed for '{q}': {str(e)[:80]}")
+
+    def search():
+        failed = 0
+        for t in topics:
+            for q in t.get("youtube_queries", [])[:2]:
+                try:
+                    jobs.check()
+                    for c in youtube_search(q):
+                        if c["url"] in seen or c["url"] in done:
+                            continue
+                        if c["channel"].lower() in blocked:
+                            continue
+                        if not (180 <= c["duration"] <= 3 * 3600):
+                            continue
+                        seen.add(c["url"])
+                        c["found_for"] = t["topic"]
+                        cands.append(c)
+                except jobs.Cancelled:
+                    raise
+                except Exception as e:
+                    failed += 1
+                    log(f"   search failed for '{q}': {str(e)[:80]}")
+        return failed
+
+    # Every search failing usually means YouTube changed something: get a newer yt-dlp and retry.
+    if search() and not cands and ytdlp.update(log):
+        search()
     if not cands:
         raise RuntimeError("YouTube search returned nothing usable.")
     log(f"   ranking {len(cands)} candidates…")
