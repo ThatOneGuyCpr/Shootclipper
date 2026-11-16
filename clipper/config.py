@@ -45,11 +45,15 @@ DEFAULTS = {
     "news_refresh_days": 2,          # how often the scout re-searches the news
     "auto_clips": 2,                 # clips Autopilot renders per interview
     "auto_min_rating": 4,
-    "open_folder_when_done": True,
+    "open_folder_when_done": False,
+    "proofread_captions": True,      # Claude checks each clip's captions against your name list before rendering
+    "cold_open": False,              # start each clip with a two-second flash of its best moment
+    "learn_from_views": True,        # tell Claude which of your posted clips did well and badly
+    "posting_reminders": False,      # Windows notification when a scheduled clip's slot arrives
     "gameplay_dir": "",              # folder of your own 2K captures
     "gameplay_speed": 2.0,           # fixed speed-up applied to every 2K capture
     "theme": "system",               # system | light | dark
-    "config_version": 2,
+    "config_version": 3,
     "framing_mode": "split when matched",  # split when matched | alternate (A/B test) | face only
     "transcribe_mode": "stories",    # stories = find the story sections from YouTube captions first and
                                      # transcribe only those; full = always transcribe everything
@@ -94,6 +98,9 @@ def load():
         if saved.get("caption_size") == 66:
             cfg["caption_size"] = DEFAULTS["caption_size"]
         cfg["config_version"] = 2
+    if saved and saved.get("config_version", 1) < 3:
+        cfg["open_folder_when_done"] = False      # the folder no longer opens by itself
+        cfg["config_version"] = 3
     Path(cfg["workspace"]).mkdir(parents=True, exist_ok=True)
     return cfg
 

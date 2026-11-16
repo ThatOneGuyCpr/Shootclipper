@@ -41,6 +41,7 @@ Rules:
 - context_card: a 2-3 second text card shown before the clip that gives a non-fan the setup. Max 20 words. Example: "2005. Jim Cornette runs WWE's training ground. John Laurinaitis just took over talent relations."
 - caption: the TikTok description. Under 150 characters, conversational, can end with a question to drive comments. Never name the production company or distributor (RF Video, Title Match, Kayfabe Commentaries, Inside the Ropes, YouShoot) in hooks, cards or captions.
 - hashtags: 8-12, mixing wrestler names, era/promotion tags and niche tags. Always include #wrestling #wrestlingtiktok #shootinterview.
+- teaser_start / teaser_end: the 1.5 to 3 seconds inside the clip that would stop someone scrolling if shown first (the wildest line or the reaction to it; not the opening line, and cut on word boundaries). Use 0 for both if nothing stands out.
 - framing: "face" for almost everything, including two-person shots: the app crops to whoever is talking and follows the conversation. Use "wide" only when the picture needs everyone at once (a panel of three or more, or something being shown or acted out on screen).
 - flags: note anything needing care: deceased subjects (treat with affection, never mockery), Chris Benoit, graphic violence described about a living person, accusations of crimes, slurs, Teddy Hart's legal history. Empty list if none.
 - gameplay_wrestlers: the channel stages a WWE 2K match above each clip between the people in the story.
@@ -81,6 +82,8 @@ CLIP_SCHEMA = {
                     "caption": {"type": "string"},
                     "hashtags": {"type": "array", "items": {"type": "string"}},
                     "framing": {"type": "string", "enum": ["face", "wide"]},
+                    "teaser_start": {"type": "number", "description": "start of the cold-open moment in seconds, or 0"},
+                    "teaser_end": {"type": "number", "description": "end of the cold-open moment in seconds, or 0"},
                     "why": {"type": "string", "description": "one or two sentences: the story in brief and why it works"},
                     "flags": {"type": "array", "items": {"type": "string"}},
                     "series": {"type": "string"},
@@ -118,8 +121,46 @@ def story_notes(notes):
                      for s in stories if s.get("strength", 0) >= 3)
 
 
-def build_context(interview, data, energy, news_text="", notes=None):
+def performance_notes(rows=None, min_clips=8):
+    """What your posted clips' view counts say, for Claude. Empty until there are enough to
+    mean something."""
+    rows = db.performance() if rows is None else rows
+    if len(rows) < min_clips:
+        return ""
+    views = sorted(r["views"] for r in rows)
+    median = views[len(views) // 2]
+
+    def line(r):
+        return (f"- {r['views']:,} views: “{r['title']}” ({r['speaker'] or 'unknown'}, "
+                f"{r['end'] - r['start']:.0f}s, {'2K split' if r['framing'] == 'split' else r['framing']})")
+
+    def avg(group):
+        return round(sum(r["views"] for r in group) / len(group)) if group else 0
+    ranked = sorted(rows, key=lambda r: -r["views"])
+    n = min(5, len(rows) // 3)
+    out = [f"{len(rows)} posted clips with view counts; the median is {median:,} views.",
+           "Best performers:"] + [line(r) for r in ranked[:n]] + \
+          ["Weakest performers:"] + [line(r) for r in ranked[-n:]]
+    buckets = [("under 45s", lambda d: d < 45), ("45 to 75s", lambda d: 45 <= d <= 75), ("over 75s", lambda d: d > 75)]
+    lengths = [(name, [r for r in rows if test(r["end"] - r["start"])]) for name, test in buckets]
+    lengths = [f"{name}: {avg(g):,} avg ({len(g)})" for name, g in lengths if len(g) >= 2]
+    if len(lengths) >= 2:
+        out.append("By length: " + "; ".join(lengths))
+    speakers = {}
+    for r in rows:
+        if r["speaker"]:
+            speakers.setdefault(r["speaker"], []).append(r)
+    by_speaker = sorted(((avg(g), s, len(g)) for s, g in speakers.items() if len(g) >= 2), reverse=True)
+    if len(by_speaker) >= 2:
+        out.append("By speaker: " + "; ".join(f"{s}: {a:,} avg ({k})" for a, s, k in by_speaker[:8]))
+    return "\n".join(out)
+
+
+def build_context(interview, data, energy, news_text="", notes=None, learn=True):
     lib = db.library_digest()
+    perf = performance_notes() if learn else ""
+    learned = ["", "HOW THIS CHANNEL'S CLIPS HAVE DONE (lean toward what works when choosing and "
+               "rating, without repeating old clips; small numbers, so treat it as a hint):", perf] if perf else []
     first_pass = story_notes(notes) if data.get("partial") else ""
     coverage = []
     if data.get("partial"):
@@ -146,6 +187,7 @@ def build_context(interview, data, energy, news_text="", notes=None):
         "",
         "CLIPS ALREADY IN THE LIBRARY (for series connections; don't duplicate):",
         "\n".join(f"- {x}" for x in lib) if lib else "- (none yet)",
+        *learned,
         "",
         "The attached contact sheet shows frames across the interview with timestamps; "
         "use it to see who is on screen, wide vs close shots, and watermarks.",
@@ -161,12 +203,12 @@ def _image_block(path):
     return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}}
 
 
-def run_api(interview, data, energy, contact_path, model, log, news_text="", notes=None):
+def run_api(interview, data, energy, contact_path, model, log, news_text="", notes=None, learn=True):
     client = llm.client()
     content = []
     if contact_path and Path(contact_path).exists():
         content.append(_image_block(contact_path))
-    content.append({"type": "text", "text": build_context(interview, data, energy, news_text, notes)})
+    content.append({"type": "text", "text": build_context(interview, data, energy, news_text, notes, learn)})
     log(f"   asking {model} for clip picks…")
     result, responses = llm.structured(
         client, model=model, schema=CLIP_SCHEMA, max_tokens=32000,
@@ -177,7 +219,7 @@ def run_api(interview, data, energy, contact_path, model, log, news_text="", not
     for r in responses:
         i, o = llm.usage_tokens(r.usage)
         in_tok, out_tok = in_tok + i, out_tok + o
-    cost = llm.cost(model, responses)
+    cost = llm.spend("clip picks", model, responses)
     log(f"   {in_tok:,} tokens in, {out_tok:,} out, about ${cost:.3f}")
     return result, cost
 

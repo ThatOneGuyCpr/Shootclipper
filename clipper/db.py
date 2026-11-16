@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS clips (
     posted_at TEXT DEFAULT '', views INTEGER DEFAULT 0, notes TEXT DEFAULT '',
     created REAL
 );
+CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at REAL, kind TEXT, model TEXT, cost REAL
+);
 """
 
 # Clip status flow: suggested -> approved -> rendered -> scheduled -> posted
@@ -56,9 +60,15 @@ def init():
         if "attempts" not in cols:
             c.execute("ALTER TABLE interviews ADD COLUMN attempts INTEGER DEFAULT 0")
         ccols = {r[1] for r in c.execute("PRAGMA table_info(clips)")}
-        for col in ("gameplay", "gameplay_hint", "speaker"):
+        for col in ("gameplay", "gameplay_hint", "speaker", "scheduled_at", "cover"):
             if col not in ccols:
                 c.execute(f"ALTER TABLE clips ADD COLUMN {col} TEXT DEFAULT ''")
+        for col in ("teaser_start", "teaser_end"):
+            if col not in ccols:
+                c.execute(f"ALTER TABLE clips ADD COLUMN {col} REAL DEFAULT 0")
+        for col in ("reminded", "proofed"):
+            if col not in ccols:
+                c.execute(f"ALTER TABLE clips ADD COLUMN {col} INTEGER DEFAULT 0")
 
 
 def _rows(sql, args=()):
@@ -114,8 +124,8 @@ def add_clips(iid, clips):
     for c in clips:
         _exec(
             "INSERT INTO clips (interview_id,title,start,end,hook,context_card,caption,"
-            "hashtags,rating,crossover,why,flags,series,framing,gameplay_hint,speaker,created) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "hashtags,rating,crossover,why,flags,series,framing,gameplay_hint,speaker,created,"
+            "teaser_start,teaser_end) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (iid, c.get("title", ""), float(c["start"]), float(c["end"]),
              c.get("hook", ""), c.get("context_card", ""), c.get("caption", ""),
              " ".join(c.get("hashtags", [])) if isinstance(c.get("hashtags"), list)
@@ -123,7 +133,8 @@ def add_clips(iid, clips):
              int(c.get("rating", 3)), int(bool(c.get("crossover", False))),
              c.get("why", ""), json.dumps(c.get("flags", [])), c.get("series", ""),
              c.get("framing", "face"), ", ".join(c.get("gameplay_wrestlers", []) or []),
-             c.get("speaker", ""), time.time()))
+             c.get("speaker", ""), time.time(),
+             float(c.get("teaser_start") or 0), float(c.get("teaser_end") or 0)))
 
 
 def clear_suggestions(iid):
@@ -163,6 +174,26 @@ def library_digest(limit=60):
                  "('approved','rendered','scheduled','posted') ORDER BY id DESC LIMIT ?",
                  (limit,))
     return [f"{r['title']}" + (f" [series: {r['series']}]" if r["series"] else "") for r in rows]
+
+
+def add_usage(kind, model, cost):
+    """Record what a Claude call cost, for the monthly total in Settings."""
+    if cost and cost > 0:
+        _exec("INSERT INTO usage (at, kind, model, cost) VALUES (?,?,?,?)",
+              (time.time(), kind, model, float(cost)))
+
+
+def usage_since(t):
+    """{kind: (calls, dollars)} since time t."""
+    rows = _rows("SELECT kind, COUNT(*) AS n, SUM(cost) AS c FROM usage WHERE at >= ? GROUP BY kind", (t,))
+    return {r["kind"]: (r["n"], r["c"] or 0.0) for r in rows}
+
+
+def performance():
+    """Posted clips with logged views, newest first, for learning what works."""
+    return _rows("SELECT c.title, c.speaker, c.framing, c.views, c.hook, c.rating, c.start, c.end, "
+                 "c.posted_at, i.source_label FROM clips c JOIN interviews i ON i.id = c.interview_id "
+                 "WHERE c.status = 'posted' AND c.views > 0 ORDER BY c.posted_at DESC LIMIT 200")
 
 
 def taken_slots():

@@ -126,7 +126,7 @@ def _ask(client, model, jpegs, prompt):
     content.append({"type": "text", "text": prompt})
     result, responses = llm.structured(client, model=model, schema=FIND_SCHEMA, max_tokens=1500,
                                        messages=[{"role": "user", "content": content}])
-    return result, llm.cost(model, responses)
+    return result, llm.spend("2K finish", model, responses)
 
 
 def _nearest(times, value):

@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import (applog, cleanup, config, db, ingest, jobs, news, pipeline, render, signals, transcribe,
-               updater, util, ytdlp)
+               remind, updater, util, ytdlp)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -189,6 +189,7 @@ class Api:
         return self._media(t)
 
     def _next_slot(self):
+        """(label, ISO time) of the next free posting slot."""
         taken = db.taken_slots()
         days = self._cfg.get("post_days", [0, 2, 4])
         hh, mm = map(int, str(self._cfg.get("post_time", "19:30")).split(":"))
@@ -198,8 +199,8 @@ class Api:
             if slot.weekday() in days and slot > now:
                 label = slot.strftime("%a %b %d %I:%M %p")
                 if label not in taken:
-                    return label
-        return ""
+                    return label, slot.isoformat(timespec="minutes")
+        return "", ""
 
     # ── status ──────────────────────────────────────────────────────────────
 
@@ -611,8 +612,8 @@ class Api:
 
     @exposed
     def schedule(self, cid):
-        slot = self._next_slot()
-        db.update_clip(int(cid), status="scheduled", scheduled_for=slot)
+        slot, at = self._next_slot()
+        db.update_clip(int(cid), status="scheduled", scheduled_for=slot, scheduled_at=at, reminded=0)
         self._log(f"Slotted for {slot}. Set the same time in TikTok Studio when you upload.")
         return slot
 
@@ -624,13 +625,67 @@ class Api:
 
     @exposed
     def unpost(self, cid):
-        db.update_clip(int(cid), status="rendered", posted_at="", scheduled_for="")
+        db.update_clip(int(cid), status="rendered", posted_at="", scheduled_for="", scheduled_at="")
         return True
 
     @exposed
     def set_views(self, cid, views):
         db.update_clip(int(cid), views=int(str(views).replace(",", "").strip() or 0))
         return True
+
+    @exposed
+    def save_cover(self, cid, t):
+        """Save the frame at `t` seconds of a finished clip as its cover image, next to the
+        video (TikTok and YouTube both let you upload a cover)."""
+        c = db.get_clip(int(cid))
+        video = Path(c.get("output_path") or "")
+        if not video.exists():
+            raise RuntimeError("Render the clip first.")
+        cover = video.with_suffix(".cover.jpg")
+        util.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{max(0.0, float(t)):.3f}", "-i", str(video),
+                  "-frames:v", "1", "-q:v", "2", str(cover)])
+        db.update_clip(int(cid), cover=str(cover))
+        return {"path": str(cover), "name": cover.name, "url": self._media(str(cover)), "t": float(t)}
+
+    @exposed
+    def spend(self):
+        """Claude API spend this month and last, by job."""
+        now = dt.datetime.now()
+        this = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        last = (this - dt.timedelta(days=1)).replace(day=1)
+        cur = db.usage_since(this.timestamp())
+        both = db.usage_since(last.timestamp())
+        prev = {k: (both[k][0] - cur.get(k, (0, 0))[0], both[k][1] - cur.get(k, (0, 0))[1]) for k in both}
+        rows = sorted(({"kind": k, "calls": n, "cost": round(c, 3)} for k, (n, c) in cur.items()),
+                      key=lambda r: -r["cost"])
+        return {"month": now.strftime("%B"), "total": round(sum(c for _, c in cur.values()), 2),
+                "calls": sum(n for n, _ in cur.values()), "by_kind": rows,
+                "last_month": last.strftime("%B"), "last_total": round(sum(c for _, c in prev.values()), 2)}
+
+    @exposed
+    def support_log(self):
+        """The recent log plus version details, as text to paste when reporting a problem."""
+        import platform
+        lines = []
+        try:
+            lines = applog.path().read_text(encoding="utf-8", errors="replace").splitlines()[-400:]
+        except OSError:
+            pass
+        head = [f"Shoot Clipper {updater.version()} ({'installed' if updater.FROZEN else 'source'})",
+                f"Windows: {platform.platform()}", f"Python: {platform.python_version()}",
+                f"Model: {self._cfg.get('model')}, analysis: {self._cfg.get('analysis_mode')}, "
+                f"transcribe: {self._cfg.get('transcribe_mode')}, whisper: {self._cfg.get('whisper_model')}",
+                "-" * 60]
+        return "\n".join(head + lines)
+
+    @exposed
+    def reminders(self, enable):
+        msg = remind.set_enabled(bool(enable), ROOT)
+        if enable:      # show one straight away, so you know what to look for
+            remind.notify("Posting reminders are on", "You'll see a notification like this when a scheduled clip is due.")
+        self._cfg["posting_reminders"] = bool(enable)
+        config.save(self._cfg)
+        return msg
 
     @exposed
     def open_clip_file(self, cid):

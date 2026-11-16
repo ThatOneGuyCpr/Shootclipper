@@ -111,6 +111,18 @@ def cost(model, responses, searches=0):
     return total
 
 
+def spend(kind, model, responses, searches=0):
+    """cost() plus a line in the usage ledger. kind: news, ranking, screening, clip picks,
+    2K finish, proofreading."""
+    total = cost(model, responses, searches)
+    try:
+        from . import db
+        db.add_usage(kind, model, total)
+    except Exception:
+        pass                     # bookkeeping must never break a run
+    return total
+
+
 @friendly
 def structured(client, *, model, schema, messages, system=None, max_tokens=4000):
     """One call whose reply is a JSON object matching `schema`.

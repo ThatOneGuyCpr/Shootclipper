@@ -40,6 +40,16 @@ If you later drag a clip's edges past a transcribed section, the missing part is
 
 Stories come first: anecdotes told by someone who was there, with a setup and a payoff (backstage fights, ribs, firings, road stories, how a famous moment really happened). Any era counts. Timeliness gives a good story a boost but doesn't rescue a weak one, and opinions, hot takes and news reactions rank below a decent story.
 
+## Extras
+
+- **Caption proofreading** (on): before a clip renders, Claude checks its captions for misheard names and respells them. It can only swap a word for a word, so timing never changes.
+- **Cold open** (off; Settings > Make clips): each clip starts with a two-second flash of its best moment, then plays from the top. Works on clips picked after you turn it on.
+- **Learn from my views** (on): once about eight posted clips have view counts in Library, Claude sees your best and worst performers, and averages by length and speaker, when it picks new clips.
+- **Cover frames**: in Review, open a finished clip, pause on the frame you want and press **Use this frame as the cover**. The image is saved next to the video for uploading as the cover.
+- **Posting reminders** (off; Settings > Posting and files): a Windows notification when a scheduled clip's time arrives, whether or not the app is open.
+- **Spent on Claude** (Settings > Claude): this month's and last month's API spend, by job.
+- **Copy log for support** (Settings > Posting and files): copies the recent log and version details to paste when something breaks.
+
 ## Storage
 
 Settings > **Storage** shows how much space interview videos and finished clips take, with two rules:
@@ -117,6 +127,7 @@ Pro plans don't include API credits, so API mode uses prepaid credit. Current So
 | Ranking YouTube candidates | about $0.03 |
 | Reading captions to find stories | under $0.01 per interview |
 | Finding a 2K capture's finish | about $0.02, once per capture |
+| Proofreading a clip's captions | well under $0.01 per clip |
 
 At three posts a week that's roughly **$4 to $8 a month**, most of it the news scout. Changing **Check the news every** in Settings from 2 days to 4 roughly halves that part. Every call logs its cost. **Paste** mode (Settings) costs nothing: the app copies a packet you paste into your Claude Project and you paste the reply back. Paste mode can't search for interviews on its own, so you'd queue links yourself.
 

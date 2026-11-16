@@ -50,7 +50,7 @@ def _clip_files(c, workspace):
     if not out or not _inside(out, workspace):
         return []
     p = Path(out)
-    return [f for f in (p, p.with_suffix(".txt")) if f.is_file()]
+    return [f for f in (p, p.with_suffix(".txt"), p.with_suffix(".cover.jpg")) if f.is_file()]
 
 
 def _finished_at(iv):

@@ -48,6 +48,7 @@ def clean_state(tmp_path, monkeypatch):
     with db._conn() as c:
         c.execute("DELETE FROM clips")
         c.execute("DELETE FROM interviews")
+        c.execute("DELETE FROM usage")
     monkeypatch.setattr(config, "get_api_key", lambda: "sk-test")
     # No test may reach PyPI for a newer yt-dlp; test_ytdlp.py opts back in with a fake.
     monkeypatch.setattr(ytdlp, "update", lambda log=None: None)

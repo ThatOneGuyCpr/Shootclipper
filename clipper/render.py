@@ -396,7 +396,13 @@ def render_clip(cfg, interview, clip, transcript, out_dir, log):
                     other = matchend.finish(f, cfg, log)
                     if other:
                         ends[f] = other
-            plan = gameplay_plan(files, dur, speed, ends=ends)
+            until = clip.get("gameplay_until")       # a cold open plays the 2K just before the clip's
+            if until and until[1] >= dur * speed and Path(until[0]).exists():
+                plan = [(until[0], until[1] - dur * speed, dur * speed, False)]
+            else:
+                plan = gameplay_plan(files, dur, speed, ends=ends)
+            if isinstance(clip.get("_report"), dict):
+                clip["_report"]["game_start"] = (plan[0][0], plan[0][1])
             if len(plan) > 1:
                 log(f"      2K: {len(plan)} captures chained at {speed:g}x")
             g_inputs, gamechain = _gameplay_inputs(plan, nxt, speed, OUT_W, SPLIT_GAME_H)
@@ -426,6 +432,46 @@ def render_clip(cfg, interview, clip, transcript, out_dir, log):
         return out_path
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def teaser_span(clip):
+    """The (start, end) of a clip's cold-open moment, or None if it has no usable one."""
+    try:
+        s, e = float(clip.get("teaser_start") or 0), float(clip.get("teaser_end") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not (1.0 <= e - s <= 4.0):
+        return None
+    # Inside the clip, and far enough in that it isn't just the opening line again.
+    if s < float(clip["start"]) + 6 or e > float(clip["end"]) + 0.2:
+        return None
+    return s, e
+
+
+def add_cold_open(cfg, interview, clip, transcript, out_path, log, game_start=None):
+    """Put a flash of the clip's best moment in front of it: the teaser is rendered in the
+    same layout (no name plate or hook text), then joined to the finished clip."""
+    span = teaser_span(clip)
+    if not span:
+        return out_path
+    out_path = Path(out_path)
+    quiet = dict(cfg, name_plate=False, hook_text=False, context_cards=False)
+    piece = dict(clip, start=span[0], end=span[1], gameplay_until=game_start, context_card="", hook="")
+    tmp = Path(tempfile.mkdtemp(prefix="cold_"))
+    try:
+        teaser = render_clip(quiet, interview, piece, transcript, tmp, lambda m: None)
+        joined = tmp / "joined.mp4"
+        util.run(["ffmpeg", "-y", "-v", "error", "-i", str(teaser), "-i", str(out_path),
+                  "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
+                  "-map", "[v]", "-map", "[a]",
+                  "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-profile:v", "high",
+                  "-pix_fmt", "yuv420p", "-r", str(FPS), "-g", "60",
+                  "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(joined)])
+        shutil.move(str(joined), out_path)
+        log(f"      cold open added ({span[1] - span[0]:.1f} s from {util.ts(span[0])})")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return out_path
 
 
 def post_text(clip):

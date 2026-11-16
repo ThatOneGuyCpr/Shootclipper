@@ -4,6 +4,7 @@
     python app.py --browser    open in your default browser instead (also the automatic
                                fallback if the window can't start)
     ShootClipper.exe --autopilot [N]   one headless Make clips pass (Task Scheduler uses this)
+    ShootClipper.exe --remind          show a notification if a scheduled clip is due
     ShootClipper.exe --selftest OUT    check the packaged build and write a report to OUT
 """
 import multiprocessing
@@ -51,6 +52,10 @@ def main():
         i = args.index("--selftest")
         out = args[i + 1] if i + 1 < len(args) else "selftest.txt"
         sys.exit(selftest.run(out))
+    if "--remind" in args:
+        from clipper import remind
+        remind.check()
+        return
     if "--autopilot" in args:
         import autopilot
         sys.argv = [sys.argv[0]] + [a for a in args if a != "--autopilot"]

@@ -1,14 +1,8 @@
-**Much less waiting**
-- Before downloading anything, Shoot Clipper reads YouTube's captions and has a small Claude model find the stories. Found interviews now show how many stories each holds and name the best ones; interviews with none are dropped.
-- Only the story sections are transcribed, instead of the whole interview. If you stretch a clip past a transcribed section, the extra is transcribed when you render (or press Transcribe more around this clip in Review). To transcribe everything as before: Settings > Transcription > Transcribe.
-
-**Better edits**
-- On shots with two or more people, the interview crop cuts to whoever is talking and reframes for their height. Switch off with Settings > 2K footage > Follow the speaker.
-- 2K captures no longer need trimming: the app finds the winner screen (or the victory celebration) once per capture and times the clip to end there. Switch off with Find the finish.
-- Old 4:3 interviews with bars down the sides are cropped inside the real picture.
-
-**Fewer things that can break**
-- The YouTube downloader now updates itself, daily and whenever a download fails, without waiting for a Shoot Clipper update.
-- A full code review fixed a batch of bugs: Stop could leave thumbnails and previews failing afterwards; Find more replaced your found interviews instead of adding to them; a file that isn't a video left a broken entry behind; a damaged settings or news file could stop the app loading; the daily run and the app could work on the same interview at once.
-- Claude errors now say what to do (bad key, out of credit, busy servers) instead of showing raw error text.
-- Every release now has to pass 116 automated tests on Windows, plus the packaged app's self-test, before it is published.
+- **The folder no longer opens by itself** when clips finish. Turn it back on in Settings > Make clips if you miss it.
+- **Caption proofreading**: before a clip renders, Claude checks its captions for misheard names and fixes the spelling.
+- **Cold open** (off by default; Settings > Make clips): a two-second flash of the clip's best moment plays first.
+- **Learn from my views**: once about eight posted clips have view counts, Claude sees what did well and badly when picking new clips.
+- **Cover frames**: pause a finished clip in Review and press Use this frame as the cover; the image is saved next to the video.
+- **Posting reminders** (off by default; Settings > Posting and files): a Windows notification when a scheduled clip is due.
+- **Spent on Claude**: Settings > Claude shows this month's and last month's API spend, by job.
+- **Copy log for support**: one button copies the recent log and version details.

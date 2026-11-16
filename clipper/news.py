@@ -152,7 +152,7 @@ def scout(cfg, log):
     for _ in range(6):
         resp = _search_turn(client, model=model, messages=messages)
         searches = getattr(getattr(resp.usage, "server_tool_use", None), "web_search_requests", 0) or 0
-        total += llm.cost(model, [resp], searches)
+        total += llm.spend("news", model, [resp], searches)
         notes += "".join(getattr(b, "text", "") for b in resp.content
                          if getattr(b, "type", "") == "text")
         if resp.stop_reason != "pause_turn":
@@ -163,7 +163,7 @@ def scout(cfg, log):
     result, responses = llm.structured(
         client, model=model, schema=TOPICS_SCHEMA, max_tokens=4000,
         messages=[{"role": "user", "content": STRUCTURE_PROMPT.format(today=today, notes=notes)}])
-    total += llm.cost(model, responses)
+    total += llm.spend("news", model, responses)
     if not result.get("topics"):
         raise RuntimeError("News scout didn't return topics.")
     result["fetched_at"] = dt.datetime.now().isoformat(timespec="seconds")
@@ -273,7 +273,7 @@ def discover(cfg, news, log):
     by_url = {c["url"]: c for c in cands}
     picks = [dict(p, **{k: by_url[p["url"]].get(k, 0) for k in ("title", "channel", "duration", "views")})
              for p in picks if p["url"] in by_url]
-    cost = llm.cost(model, responses)
+    cost = llm.spend("ranking", model, responses)
     log(f"   {len(picks)} picks, about ${cost:.3f}")
     if cfg.get("transcribe_mode", "stories") == "stories":
         picks = screen_picks(cfg, picks, log)

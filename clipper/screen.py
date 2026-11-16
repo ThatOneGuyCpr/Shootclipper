@@ -228,7 +228,7 @@ def find_stories(cfg, title, cues, duration, client=None):
         result, responses = llm.structured(client, model=model, schema=SCREEN_SCHEMA, max_tokens=4000,
                                            messages=[{"role": "user", "content": prompt}])
     return (_clean_stories(result.get("stories"), duration), str(result.get("summary", "")),
-            llm.cost(model, responses))
+            llm.spend("screening", model, responses))
 
 
 def screen_url(cfg, url, client=None):

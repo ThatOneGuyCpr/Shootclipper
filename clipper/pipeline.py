@@ -10,7 +10,7 @@ stay finished, so pressing Make clips again picks up where it stopped.
 import traceback
 from pathlib import Path
 
-from . import (analyze, cleanup, config, db, gameplay, ingest, jobs, news, render, screen,
+from . import (analyze, cleanup, config, db, gameplay, ingest, jobs, news, proof, render, screen,
                signals, transcribe, util)
 
 MAX_AUTO_RETRIES = 2  # Make clips retries a failed interview this many times, then skips it
@@ -160,7 +160,7 @@ def process_interview(cfg, iid, log, progress=lambda p: None, step=_no_step):
         contact = wd / "contact_sheet.jpg"
         result, cost = analyze.run_api(iv, data, energy, contact if contact.exists() else None,
                                        cfg["model"], log, current_news_text(cfg),
-                                       notes=screen.load(wd))
+                                       notes=screen.load(wd), learn=cfg.get("learn_from_views", True))
         n = analyze.ingest_result(iv, data, result)
         if n == 0 and data.get("partial"):
             # The first pass pointed at the wrong places. Fall back to the full transcript once.
@@ -169,7 +169,8 @@ def process_interview(cfg, iid, log, progress=lambda p: None, step=_no_step):
             data = transcribe.transcribe(iv["source_path"], iv["title"], wd, cfg, log, progress)
             step("transcribe", "done")
             result, more = analyze.run_api(iv, data, energy, contact if contact.exists() else None,
-                                           cfg["model"], log, current_news_text(cfg))
+                                           cfg["model"], log, current_news_text(cfg),
+                                           learn=cfg.get("learn_from_views", True))
             cost += more
             n = analyze.ingest_result(iv, data, result)
         db.update_interview(iid, status="analyzed", cost=(iv.get("cost") or 0) + cost, error="",
@@ -262,7 +263,17 @@ def render_clip(cfg, clip_id, log):
         clip["gameplay_extra"] = gameplay.siblings(cfg.get("gameplay_dir", ""), clip["gameplay"],
                                                    clip, iv, text)
     log(f"🎬 Rendering “{clip['title']}” ({util.ts(clip['end'] - clip['start'])})")
+    data = proof.ensure(cfg, iv, clip, data, log)
+    report = {}
+    clip["_report"] = report
     out = render.render_clip(cfg, iv, clip, data, ready_dir(cfg), log)
+    if cfg.get("cold_open") and render.teaser_span(clip):
+        try:
+            render.add_cold_open(cfg, iv, clip, data, out, log, report.get("game_start"))
+        except jobs.Cancelled:
+            raise
+        except Exception as e:
+            log(f"      cold open skipped ({str(e)[:100]})")
     db.update_clip(clip_id, status="rendered", output_path=str(out))
     log(f"   saved {out.name}")
     return out

@@ -370,6 +370,7 @@ function renderFinished() {
   $$("#modeSeg button")[1].disabled = !d.output_url;
   if (d.output_url) {
     if (v.dataset.url !== d.output_url) { v.dataset.url = d.output_url; v.src = d.output_url; }
+    $("#coverNote").textContent = "";
     $("#finishedNote").textContent = `Rendered. This is the file in Ready to post.${d.gameplay_name ? ` 2K capture: ${d.gameplay_name} at ${d.speed}x.` : ""}`;
   } else { v.removeAttribute("src"); delete v.dataset.url; }
 }
@@ -586,6 +587,10 @@ function wireReview() {
   $("#rejectBtn").onclick = async () => { await flushSave(); await attempt(() => call("set_clip_status", R.cid, "rejected")); };
   $("#renderApprovedBtn").onclick = () => attempt(() => call("render_approved"));
   $("#openOutBtn").onclick = () => attempt(() => call("open_clip_file", R.cid));
+  $("#coverBtn").onclick = async () => {
+    const c = await attempt(() => call("save_cover", R.cid, $("#outVideo").currentTime));
+    if (c) { $("#coverNote").textContent = `Cover saved from ${fmt(c.t, 1)}: ${c.name}, next to the video.`; toast("Cover saved"); }
+  };
   $("#copyCapBtn2").onclick = async () => { const t = await attempt(() => call("post_text", R.cid)); if (t) { await copy(t); toast("Caption copied"); } };
   wireTimeline();
   document.addEventListener("keydown", e => {
@@ -654,11 +659,15 @@ const SETTINGS = [
     { key: "model", label: "Model", type: "select", options: "models", hint: "Sonnet is the best value. Opus picks slightly better clips at about twice the cost." },
     { key: "news_refresh_days", label: "Check the news every", type: "number", unit: "days" },
     { custom: "paste_news" },
+    { custom: "spend" },
+    { key: "learn_from_views", label: "Learn from my views", type: "bool", hint: "Once about eight posted clips have view counts, Claude sees which did well and badly when it picks new clips." },
   ]],
   ["Make clips", [
     { key: "pick_mode", label: "Choosing interviews", type: "select", options: [["ask", "Show me what it found, I pick"], ["auto", "Pick the best one automatically"]], hint: "Queued interviews always go first. The daily run always picks automatically." },
     { key: "auto_clips", label: "Clips per interview", type: "number", hint: "How many Make clips renders from each interview." },
     { key: "auto_min_rating", label: "Lowest rating to render", type: "number", unit: "of 5", hint: "If nothing rates this high, the single best clip is rendered." },
+    { key: "proofread_captions", label: "Proofread captions", type: "bool", hint: "Before rendering, Claude checks the clip's captions for misheard names and fixes them. Well under a cent per clip." },
+    { key: "cold_open", label: "Cold open", type: "bool", hint: "Starts each clip with a two-second flash of its best moment, then plays the story from the top. Applies to clips picked from now on." },
     { key: "open_folder_when_done", label: "Open the folder when done", type: "bool" },
     { custom: "autopilot" },
   ]],
@@ -690,6 +699,7 @@ const SETTINGS = [
   ["Posting and files", [
     { key: "post_days", label: "Posting days", type: "days" },
     { key: "post_time", label: "Posting time", type: "text", hint: "24-hour, like 19:30. Used for the slots in Library." },
+    { key: "posting_reminders", label: "Posting reminders", type: "bool", hint: "A Windows notification when a scheduled clip's time arrives, whether or not Shoot Clipper is open. The PC has to be on." },
     { key: "workspace", label: "Workspace folder", type: "folder", hint: "Downloads, transcripts and finished clips live here." },
     { custom: "files" },
   ]],
@@ -712,6 +722,13 @@ async function loadStorage() {
   if (!u || !el) return;
   el.textContent = `Interview videos ${gb(u.downloads)} (${u.n_downloads}), finished clips ${gb(u.clips)} (${u.n_clips})`;
 }
+async function loadSpend() {
+  const u = await attempt(() => call("spend"));
+  const el = $("#spendUse");
+  if (!u || !el) return;
+  el.textContent = `$${u.total.toFixed(2)} in ${u.month} (${u.calls} ${u.calls === 1 ? "request" : "requests"}); $${u.last_total.toFixed(2)} in ${u.last_month}`;
+  if (u.by_kind.length) $("#spendHint").textContent = `${u.month}: ` + u.by_kind.map(k => `${k.kind} $${k.cost.toFixed(2)}`).join(", ") + ". Billing at platform.claude.com is the final word.";
+}
 async function loadSettings() {
   const st = await attempt(() => call("get_state"));
   if (!st) return;
@@ -725,8 +742,9 @@ async function loadSettings() {
     if (f.custom === "update") return st.installed
       ? `<div class="set-row"><span class="lbl">Version</span><span class="ctl"><span>${esc(st.version || "unknown")}</span><button class="btn" id="checkUpdate">Check for updates</button></span><span class="hint">Shoot Clipper checks when it opens and shows Update in the bottom bar when there's a new version. Settings, your library and your lists carry over.</span></div>`
       : `<div class="set-row"><span class="lbl">Version</span><span class="ctl"><span>${esc(st.version || "unknown")}</span><button class="btn" id="installUpdate">Install update…</button></span><span class="hint">Pick the ShootClipper.zip you downloaded. Settings, your library and your lists stay as they are; the app restarts when it's done.</span></div>`;
+    if (f.custom === "spend") return `<div class="set-row"><span class="lbl">Spent on Claude</span><span class="ctl"><span id="spendUse">Adding it up…</span></span><span class="hint" id="spendHint">Counted from this version on. Billing at platform.claude.com is the final word.</span></div>`;
     if (f.custom === "storage") return `<div class="set-row span"><span class="lbl">Space used</span><span class="ctl"><span id="storageUse" class="nowrap">Measuring…</span><button class="btn" id="cleanNow" title="Apply the rules below now. Old files are also cleaned when the app opens and after each Make clips.">Clean up now</button><button class="btn" id="openWs">Open folder</button></span></div>`;
-    if (f.custom === "files") return `<div class="set-row span"><span class="lbl">Lists and logs</span><span class="ctl"><button class="btn" data-file="sources">Source presets</button><button class="btn" data-file="channels">Preferred channels</button><button class="btn" data-file="blocked">Blocked channels</button><button class="btn" data-file="log">Open app log</button><button class="btn" id="openData">Open data folder</button></span></div>`;
+    if (f.custom === "files") return `<div class="set-row span"><span class="lbl">Lists and logs</span><span class="ctl"><button class="btn" data-file="sources">Source presets</button><button class="btn" data-file="channels">Preferred channels</button><button class="btn" data-file="blocked">Blocked channels</button><button class="btn" data-file="log">Open app log</button><button class="btn" id="copyLog" title="Copies the recent log and version details, ready to paste when something goes wrong">Copy log for support</button><button class="btn" id="openData">Open data folder</button></span></div>`;
     const v = cfg[f.key];
     let ctl = "";
     if (f.type === "bool") ctl = `<input type="checkbox" class="switch" data-key="${f.key}" ${v ? "checked" : ""}>`;
@@ -741,6 +759,7 @@ async function loadSettings() {
   };
   $("#settingsBody").innerHTML = SETTINGS.map(([title, fields]) => `<section class="panel set-group"><header class="ph"><h2>${title}</h2></header><div class="set-rows">${fields.map(row).join("")}</div></section>`).join("");
   loadStorage();
+  loadSpend();
 }
 async function saveSetting(key, value) {
   const cfg = await attempt(() => call("save_settings", { [key]: value }), "Saved");
@@ -752,6 +771,9 @@ function wireSettings() {
   const body = $("#settingsBody");
   body.addEventListener("change", e => {
     const el = e.target.closest("[data-key]"); if (!el) return;
+    if (el.dataset.key === "posting_reminders") {
+      return call("reminders", el.checked).then(toast).catch(err => { el.checked = !el.checked; toast(err.message || String(err)); });
+    }
     saveSetting(el.dataset.key, el.type === "checkbox" ? el.checked : el.value);
   });
   body.addEventListener("click", async e => {
@@ -772,6 +794,7 @@ function wireSettings() {
       return poll();
     }
     if (t.id === "installUpdate") { const m = await attempt(() => call("install_update")); if (m) toast(m); return; }
+    if (t.id === "copyLog") { const txt = await attempt(() => call("support_log")); if (txt) { await copy(txt); toast("Log copied. Paste it into the chat."); } return; }
     if (t.id === "openData") return attempt(() => call("open_folder", "data"));
     if (t.id === "keySave") { const msg = await attempt(() => call("save_key", $("#keyInput").value)); if (msg) { toast(msg); loadSettings(); } return; }
     if (t.id === "autoOn") { const m = await attempt(() => call("autopilot", true, $("#autoTime").value)); if (m) toast(m); return; }
