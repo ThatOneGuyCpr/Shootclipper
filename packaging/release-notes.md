@@ -1,8 +1,3 @@
-- **The folder no longer opens by itself** when clips finish. Turn it back on in Settings > Make clips if you miss it.
-- **Caption proofreading**: before a clip renders, Claude checks its captions for misheard names and fixes the spelling.
-- **Cold open** (off by default; Settings > Make clips): a two-second flash of the clip's best moment plays first.
-- **Learn from my views**: once about eight posted clips have view counts, Claude sees what did well and badly when picking new clips.
-- **Cover frames**: pause a finished clip in Review and press Use this frame as the cover; the image is saved next to the video.
-- **Posting reminders** (off by default; Settings > Posting and files): a Windows notification when a scheduled clip is due.
-- **Spent on Claude**: Settings > Claude shows this month's and last month's API spend, by job.
-- **Copy log for support**: one button copies the recent log and version details.
+- **WWE and AEW shows are filtered out.** Found interviews now skip shows the promotions own or produce (What's Your Story with Steph McMahon, Six Feet Under, Broken Skull Sessions, Impaulsive, WWE Now, AEW Unrestricted, Being The Elite and more) and shows hosted by their on-air talent (The Sessions with Renée Paquette, Grilling JR, Talk Is Jericho, What Happened When, The Taz Show). They're matched by show name in the title, whichever channel posted them. Finds you already had from these shows disappear too.
+- Your Blocked channels list gets the new entries added once; delete any line (Settings > Edit Blocked channels) to allow that show again.
+- Pasting a link to one of these shows yourself still works, with a warning in the log.

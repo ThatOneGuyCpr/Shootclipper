@@ -75,12 +75,44 @@ MODEL_PRICES = {
 KEYRING_SERVICE = "ShootClipper"
 
 
+BLOCKLIST_VERSION = 2
+# Channels dropped from the preferred list when they joined the blocked list.
+NO_LONGER_PREFERRED = {"talk is jericho", "grilling jr", "steve austin's broken skull sessions"}
+
+
 def ensure_app_dir():
     APP_DIR.mkdir(parents=True, exist_ok=True)
     for name in ("names.txt", "fixes.txt", "sources.json", "channels.txt", "blocked_channels.txt"):
         dst = APP_DIR / name
         if not dst.exists() and (BUNDLED_DATA / name).exists():
             shutil.copy(BUNDLED_DATA / name, dst)
+    _update_lists()
+
+
+def _update_lists():
+    """Bring the user's copies of the bundled lists up to date once per list version,
+    without undoing their own edits."""
+    stamp = APP_DIR / ".lists_version"
+    try:
+        have = int(stamp.read_text().strip()) if stamp.exists() else 1
+    except ValueError:
+        have = 1
+    if have >= BLOCKLIST_VERSION:
+        return
+    from . import blocklist
+    try:
+        blocked = APP_DIR / "blocked_channels.txt"
+        bundled = (BUNDLED_DATA / "blocked_channels.txt").read_text(encoding="utf-8")
+        mine = blocked.read_text(encoding="utf-8") if blocked.exists() else ""
+        blocked.write_text(blocklist.merge_bundled(mine, bundled, BLOCKLIST_VERSION), encoding="utf-8")
+        preferred = APP_DIR / "channels.txt"
+        if preferred.exists():
+            lines = preferred.read_text(encoding="utf-8").splitlines()
+            keep = [l for l in lines if l.strip().lower() not in NO_LONGER_PREFERRED]
+            preferred.write_text("\n".join(keep) + "\n", encoding="utf-8")
+        stamp.write_text(str(BLOCKLIST_VERSION))
+    except OSError:
+        pass
 
 
 def load():

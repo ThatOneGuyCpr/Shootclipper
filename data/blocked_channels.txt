@@ -1,9 +1,53 @@
-# Channels to never pull from (official promotion channels are Content ID'd hard).
+# Sources Shoot Clipper never uses. Two kinds of line:
+#   a plain name          blocks a YouTube channel (capitals and punctuation don't matter)
+#   show: name            blocks any video whose title contains it, whatever channel posted it
+# Delete a line to allow that source again. Lines starting with # are ignored.
+
+# ── Promotions' own channels (match footage gets Content ID claims fast) ──
 WWE
 WWE Vault
+WWE on FOX
+WWE Español
+WWE NXT
 All Elite Wrestling
 AEW
+AEW Español
 TNA Wrestling
 IMPACT Wrestling
 Ring of Honor Wrestling
 NJPW Global
+
+# ── WWE-owned or WWE-produced shows ──
+show: What's Your Story
+show: Steph McMahon
+show: Six Feet Under
+Six Feet Under
+show: Impaulsive
+Impaulsive
+show: What Do You Wanna Talk About
+show: WWE Now
+show: Raw Recap
+show: SmackDown LowDown
+show: Broken Skull Sessions
+show: WWE's The Bump
+show: After The Bell
+show: Feel The Power
+show: Uncool with Alexa Bliss
+show: Steph's Places
+show: WWE 24
+show: WWE Chronicle
+show: Table for 3
+show: Ruthless Aggression
+show: Out of Character
+
+# ── AEW-produced shows, and shows hosted by AEW's on-air talent ──
+show: AEW Unrestricted
+show: Being The Elite
+Being The Elite
+show: The Sessions with Ren
+Renee Paquette
+show: What Happened When
+show: The Taz Show
+show: Talk Is Jericho
+Talk Is Jericho
+show: Grilling JR

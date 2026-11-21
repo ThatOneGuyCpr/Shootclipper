@@ -9,7 +9,7 @@ import json
 import re
 from pathlib import Path
 
-from . import config, db, jobs, llm, screen, util, ytdlp
+from . import blocklist, config, db, jobs, llm, screen, util, ytdlp
 
 WEB_SEARCH_TOOL = {"type": "web_search_20260318", "name": "web_search", "max_uses": 5,
                    "response_inclusion": "excluded"}
@@ -97,6 +97,10 @@ What makes a strong pick, in order:
 Weak picks: news recap channels reading headlines, reaction videos, predictions, fantasy
 booking, panel debates, match footage, promo clips. Stronger channels: {channels}.
 Prefer videos that have NOT already been clipped by the channel.
+Never pick a show that WWE or AEW owns, produces or co-produces, or one hosted by their current
+on-air talent or broadcasters (for example Stephanie McMahon's What's Your Story, The Undertaker's
+Six Feet Under, Renee Paquette's The Sessions). Those get taken down. A promotion's wrestler
+appearing as a guest on an independent show is fine.
 In "why", say what stories the video likely holds.
 
 CURRENT TOPICS:
@@ -223,7 +227,7 @@ def youtube_search(query, n=6):
 
 def discover(cfg, news, log):
     """Stages 2 and 3. Returns ranked picks and saves them to picks.json."""
-    blocked = [b.lower() for b in _load_list("blocked_channels.txt")]
+    rules = blocklist.load()
     preferred = _load_list("channels.txt")
     done = {i["url"] for i in db.list_interviews() if i.get("url")} | dismissed()
     cands, seen = [], set()
@@ -239,7 +243,7 @@ def discover(cfg, news, log):
                     for c in youtube_search(q):
                         if c["url"] in seen or c["url"] in done:
                             continue
-                        if c["channel"].lower() in blocked:
+                        if blocklist.reason(c["channel"], c["title"], rules):
                             continue
                         if not (180 <= c["duration"] <= 3 * 3600):
                             continue

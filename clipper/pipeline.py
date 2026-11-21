@@ -10,7 +10,7 @@ stay finished, so pressing Make clips again picks up where it stopped.
 import traceback
 from pathlib import Path
 
-from . import (analyze, cleanup, config, db, gameplay, ingest, jobs, news, proof, render, screen,
+from . import (analyze, blocklist, cleanup, config, db, gameplay, ingest, jobs, news, proof, render, screen,
                signals, transcribe, util)
 
 MAX_AUTO_RETRIES = 2  # Make clips retries a failed interview this many times, then skips it
@@ -118,6 +118,9 @@ def process_interview(cfg, iid, log, progress=lambda p: None, step=_no_step):
                                 duration=info["duration"], status="downloaded")
             iv = db.get_interview(iid)
             log(f"   got “{title}” ({util.ts(info['duration'])}, {info['width']}x{info['height']})")
+            why = blocklist.reason("", title)
+            if why:
+                log(f"   ⚠ This looks like a promotion's own show ({why}). Clips from it are likely to be taken down.")
             if info["has_video"] and info["height"] < 700:
                 log("   ⚠ YouTube only offered a low-resolution copy, so clips from this one will look soft.")
             step("download", "done")
@@ -337,7 +340,9 @@ def fresh_picks(cfg):
     """Found interviews you haven't used or turned down yet."""
     used = {i["url"] for i in db.list_interviews() if i.get("url")}
     gone = news.dismissed(cfg)
-    return [p for p in news.load_picks(cfg) if p["url"] not in used and p["url"] not in gone]
+    rules = blocklist.load()     # also hides finds from before a source was blocked
+    return [p for p in news.load_picks(cfg) if p["url"] not in used and p["url"] not in gone
+            and not blocklist.reason(p.get("channel", ""), p.get("title", ""), rules)]
 
 
 def find_candidates(cfg, log, more=False):
